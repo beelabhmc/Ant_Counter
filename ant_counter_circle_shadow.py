@@ -82,9 +82,9 @@ def cluster_blobs(blobs, max_dist=15):
 PROCESS_SCALE    = 0.25   # resize factor: 4K→960×540 for processing
 DIFF_THRESH      = 15     # motion threshold — higher = fewer blobs (was 12, see notes)
 FRAME_STRIDE     = 2      # compare frame t to frame t-STRIDE
-MIN_BLOB_AREA    = 10     # min blob area in pixels at PROCESS_SCALE
+MIN_BLOB_AREA    = 15     # min blob area in pixels at PROCESS_SCALE
 MAX_BLOB_AREA    = 1200   # max blob area in pixels at PROCESS_SCALE
-MAX_TRACK_DIST   = 50     # max pixel distance to link blobs between frames
+MAX_TRACK_DIST   = 20     # max pixel distance to link blobs between frames
 
 # Persistence: how long to keep a track alive when its blob temporarily vanishes
 # (ant stops, enters the hole, passes through shadow).  2–3 s works well.
@@ -274,22 +274,52 @@ class Tracker:
             for i, blob in enumerate(blobs):
                 if i in matched_blob_idx:
                     continue
+
+                if ant["missing"] > 2 and blob["area"] < MIN_BLOB_AREA * 3:
+                    continue
+
                 d = math.hypot(blob["cx"] - ant["cx"], blob["cy"] - ant["cy"])
                 if d < best_d:
                     best_d, best_i = d, i
+            
             if best_i >= 0:
                 matched_ant_ids.add(ant_id)
                 matched_blob_idx.add(best_i)
-                ant["cx"] = blobs[best_i]["cx"]
-                ant["cy"] = blobs[best_i]["cy"]
+                ant["age"] +=1
+                # ant["cx"] = blobs[best_i]["cx"]
+                # ant["cy"] = blobs[best_i]["cy"]
+
+                alpha = 0.6
+                beta = 0.3
+
+                new_cx = blobs[best_i]["cx"]
+                new_cy = blobs[best_i]["cy"]
+                
+                ant["vx"] = beta * (new_cx - ant["cx"]) + (1 - beta) * ant["vx"]
+                ant["vy"] = beta * (new_cy - ant["cy"]) + (1 - beta) * ant["vy"]
+
+                ant["cx"] = alpha * new_cx + (1 - alpha) * ant["cx"]
+                ant["cy"] = alpha * new_cy + (1 - alpha) * ant["cy"]
                 ant["missing"] = 0
 
         # ── age out long-lost tracks ──────────────────────────────────
+
+        MIN_COAST_AGE = 8
+        
         for ant_id in list(self._ants.keys()):
             if ant_id not in matched_ant_ids:
                 self._ants[ant_id]["missing"] += 1
                 if self._ants[ant_id]["missing"] > self.max_missing:
                     del self._ants[ant_id]
+                
+                elif self._ants[ant_id]["age"] >= MIN_COAST_AGE:
+                    self._ants[ant_id]["cx"] += self._ants[ant_id]["vx"]
+                    self._ants[ant_id]["cy"] += self._ants[ant_id]["vy"]
+                    self._ants[ant_id]["vx"] *= 0.8
+                    self._ants[ant_id]["vy"] *= 0.8
+                else:
+                    del self._ants[ant_id]
+
 
         # ── create new tracks for unmatched blobs ────────────────────
         cx, cy = circle_params['center']
@@ -304,7 +334,9 @@ class Tracker:
             
             self._ants[self._next_id] = {
                 "cx": blob["cx"], "cy": blob["cy"],
+                "vx": 0.0, "vy": 0.0, 
                 "missing": 0,
+                "age": 0,
                 "committed_inside": inside,
                 "committed_quadrant": quadrant,
                 "pending_inside": inside,
@@ -314,7 +346,13 @@ class Tracker:
             self._next_id += 1
 
         # ── hysteresis crossing detection ────────────────────────────
+        MIN_CROSS_AGE = 8
+
+
         for ant_id, ant in self._ants.items():
+            if ant["age"] < MIN_CROSS_AGE:
+                continue
+
             current_inside = is_inside_circle(cx, cy, ant["cx"], ant["cy"], radius)
             current_quadrant = get_quadrant(cx, cy, ant["cx"], ant["cy"], north_angle) if not current_inside else "CENTER"
             
