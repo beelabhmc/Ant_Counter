@@ -377,6 +377,16 @@ class Tracker:
         # ── hysteresis crossing detection ────────────────────────────
         MIN_CROSS_AGE = 8
 
+        for ant_id, ant in self._ants.items():
+            if ant["age"] < MIN_CROSS_AGE:
+                continue
+
+            current_inside = is_inside_circle(cx, cy, ant["cx"], ant["cy"], radius)
+            current_quadrant = (
+                get_quadrant(cx, cy, ant["cx"], ant["cy"], north_angle)
+                if not current_inside else "CENTER"
+            )
+
             # Check if ant state changed (inside/outside or quadrant)
             current_state = (current_inside, current_quadrant)
             pending_state = (ant["pending_inside"], ant["pending_quadrant"])

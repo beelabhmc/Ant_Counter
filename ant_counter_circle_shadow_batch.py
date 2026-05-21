@@ -284,22 +284,57 @@ def _stem_circle_path(video_path: str) -> str:
     return os.path.join(out_dir, f"{stem}_circle.json")
 
 
+def _normalize_circle_params(raw: dict) -> dict | None:
+    """
+    Accept circle JSON in several shapes and return a dict with
+    center, radius, and north_angle — or None if invalid.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    # Wrapped: {"circle_params": {...}} or full output file from VideoProcessor
+    params = raw.get("circle_params") if "circle_params" in raw else raw
+    if not isinstance(params, dict):
+        return None
+
+    center = params.get("center")
+    radius = params.get("radius")
+    if center is None or radius is None:
+        return None
+
+    try:
+        cx, cy = float(center[0]), float(center[1])
+        radius = float(radius)
+    except (TypeError, ValueError, IndexError):
+        return None
+
+    north_angle = params.get("north_angle")
+    if north_angle is None and "north_point" in params:
+        np_ = params["north_point"]
+        try:
+            nx, ny = float(np_[0]), float(np_[1])
+            north_angle = angle_deg_from_center_to_point(cx, cy, nx, ny)
+        except (TypeError, ValueError, IndexError):
+            return None
+    if north_angle is None:
+        return None
+
+    return {
+        "center": (cx, cy),
+        "radius": radius,
+        "north_angle": float(north_angle),
+    }
+
+
 def _load_circle_json(path: str) -> dict | None:
-    if not os.path.isfile(path):
+    if not path or not os.path.isfile(path):
         return None
     try:
         with open(path) as f:
             data = json.load(f)
-        params = data.get("circle_params")
-        if params and "center" in params and "radius" in params:
-            if "north_angle" not in params and "north_point" in params:
-                cx, cy = params["center"]
-                nx, ny = params["north_point"]
-                params["north_angle"] = angle_deg_from_center_to_point(cx, cy, nx, ny)
-            return params
-    except (json.JSONDecodeError, OSError, TypeError, KeyError):
+        return _normalize_circle_params(data)
+    except (json.JSONDecodeError, OSError, TypeError):
         return None
-    return None
 
 
 def _circle_params_dict(center, radius, north_point) -> dict:
@@ -746,15 +781,28 @@ class BatchApp:
             return
         params = _load_circle_json(path)
         if not params:
-            messagebox.showerror("Load failed", "Could not read circle_params from file.")
+            messagebox.showerror(
+                "Load failed",
+                f"Could not read a valid circle from:\n{path}\n\n"
+                "Expected JSON with center, radius, and north_angle\n"
+                "(or north_point).  Files from outputs/*_circle.json work.")
             return
         self._apply_circle_params(params)
 
     def _apply_circle_params(self, params: dict):
-        self.circle_center = tuple(params["center"])
-        self.circle_radius = float(params["radius"])
+        normalized = _normalize_circle_params(
+            params if "circle_params" in params else {"circle_params": params})
+        if not normalized:
+            messagebox.showerror(
+                "Invalid circle",
+                "Circle JSON must include center, radius, and north_angle\n"
+                "(or north_point to derive north).")
+            return
+        params = normalized
+        self.circle_center = params["center"]
+        self.circle_radius = params["radius"]
         self._radius_var.set(int(round(self.circle_radius)))
-        ang = params.get("north_angle", 0)
+        ang = params["north_angle"]
         rad = math.radians(ang)
         cx, cy = self.circle_center
         r = max(self.circle_radius * 0.5, 50)
