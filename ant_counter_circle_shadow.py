@@ -78,6 +78,35 @@ def cluster_blobs(blobs, max_dist=15):
             clusters.append({"cx": cx, "cy": cy, "area": area})
     return clusters
 
+def build_shadow_mask(frame_bgr, kernel_size=31):
+
+    SHADOW_VAL_DROP = 40
+
+    SHADOW_HUE_STABLE = 15
+
+
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV).astype(np.int32)
+    h, s, v = hsv[:,:,0], hsv[:,:,1], hsv[:,:,2]
+
+    # Local neighbourhood average using a large blur — this is our
+    # estimate of what the pixel "should" look like without a shadow
+    k = kernel_size | 1   # ensure odd
+    v_local_avg = cv2.blur(v.astype(np.float32), (k, k))
+    h_local_avg = cv2.blur(h.astype(np.float32), (k, k))
+
+    # Shadow condition: value dropped a lot, but hue stayed similar
+    val_drop  = (v_local_avg - v.astype(np.float32)) > SHADOW_VAL_DROP
+    hue_stable = np.abs(h.astype(np.float32) - h_local_avg) < SHADOW_HUE_STABLE
+
+    shadow_raw = (val_drop & hue_stable).astype(np.uint8) * 255
+
+    # Clean up speckle
+    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    shadow_clean = cv2.morphologyEx(shadow_raw, cv2.MORPH_OPEN, k_open)
+
+    return shadow_clean
+
+
 # ── Processing parameters (tune these if detection is noisy) ─────────────────
 PROCESS_SCALE    = 0.25   # resize factor: 4K→960×540 for processing
 DIFF_THRESH      = 15     # motion threshold — higher = fewer blobs (was 12, see notes)
@@ -348,14 +377,6 @@ class Tracker:
         # ── hysteresis crossing detection ────────────────────────────
         MIN_CROSS_AGE = 8
 
-
-        for ant_id, ant in self._ants.items():
-            if ant["age"] < MIN_CROSS_AGE:
-                continue
-
-            current_inside = is_inside_circle(cx, cy, ant["cx"], ant["cy"], radius)
-            current_quadrant = get_quadrant(cx, cy, ant["cx"], ant["cy"], north_angle) if not current_inside else "CENTER"
-            
             # Check if ant state changed (inside/outside or quadrant)
             current_state = (current_inside, current_quadrant)
             pending_state = (ant["pending_inside"], ant["pending_quadrant"])
@@ -537,7 +558,9 @@ class VideoProcessor:
 
             # ── resize + grayscale ────────────────────────────────────
             small = cv2.resize(frame, (proc_w, proc_h))
-            gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            # gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+            gray = hsv[:,:,2]
 
             # ── frame-to-frame diff ───────────────────────────────────
             frame_buf.append(gray.copy())
@@ -555,6 +578,9 @@ class VideoProcessor:
             _, mask = cv2.threshold(diff, DIFF_THRESH, 255, cv2.THRESH_BINARY)
             mask  = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
             mask  = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
+
+            shadow_mask = build_shadow_mask(small)
+            mask = cv2.bitwise_and(mask, cv2.bitwise_not(shadow_mask))
 
             # ── vibration guard ───────────────────────────────────────
             # If the whole frame moved (wind shake), skip blob detection
@@ -574,8 +600,8 @@ class VideoProcessor:
                         blobs.append({"cx": centroids[i][0],
                                       "cy": centroids[i][1],
                                       "area": int(area)})
-                # Cluster blobs to reduce shadow double-counting
-                blobs = cluster_blobs(blobs, max_dist=15)
+                # Cluster blobs to reduce shadow double-counting (changed from 15 to 40)
+                blobs = cluster_blobs(blobs, max_dist=40)
 
             # ── tracking & crossing detection ─────────────────────────
             events = tracker.update(blobs, circle_proc)
