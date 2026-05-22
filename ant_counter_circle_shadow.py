@@ -35,6 +35,7 @@ import csv
 import threading
 import math
 from datetime import timedelta
+from scipy.optimize import linear_sum_assignment as _hungarian_solve
 
 try:
     from PIL import Image, ImageTk
@@ -256,19 +257,84 @@ def draw_quadrant_arcs(frame, center, radius, north_angle_deg):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tracker
+# Tracker (Kalman filter + Hungarian assignment)
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+
+# Kalman tuning (constant-velocity model in image pixels at PROCESS_SCALE)
+KF_PROC_POS = 2.0      # position process noise
+KF_PROC_VEL = 8.0      # velocity process noise
+KF_MEAS_POS = 6.0      # measurement noise (centroid observation)
+MIN_COAST_AGE = 8      # frames before a lost track is allowed to coast
+MIN_CROSS_AGE = 8      # frames before crossing events are counted
+
+
+class KalmanFilter2D:
+    """Constant-velocity Kalman filter for blob centroids (state: x, y, vx, vy)."""
+
+    def __init__(self, x: float, y: float):
+        self.x = np.array([x, y, 0.0, 0.0], dtype=np.float64)
+        self.P = np.diag([500.0, 500.0, 1000.0, 1000.0]).astype(np.float64)
+        self.F = np.array([
+            [1, 0, 1, 0],
+            [0, 1, 0, 1],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ], dtype=np.float64)
+        self.H = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+        ], dtype=np.float64)
+        self.Q = np.diag([KF_PROC_POS, KF_PROC_POS, KF_PROC_VEL, KF_PROC_VEL])
+        self.R = np.diag([KF_MEAS_POS, KF_MEAS_POS])
+        self._I = np.eye(4, dtype=np.float64)
+
+    def predict(self):
+        self.x = self.F @ self.x
+        self.P = self.F @ self.P @ self.F.T + self.Q
+        return float(self.x[0]), float(self.x[1])
+
+    def update(self, zx, zy):
+        z = np.array([zx, zy], dtype=np.float64)
+        innov = z - self.H @ self.x
+        S = self.H @ self.P @ self.H.T + self.R
+        K = self.P @ self.H.T @ np.linalg.inv(S)
+        self.x = self.x + K @ innov
+        self.P = (self._I - K @ self.H) @ self.P
+
+
+def _hungarian_match(cost, max_cost):
+    """
+    Minimum-cost assignment.  Returns (track_row, blob_col) pairs under max_cost.
+    """
+    n_tracks, n_blobs = cost.shape
+    if n_tracks == 0 or n_blobs == 0:
+        return []
+
+    pad = np.full((max(n_tracks, n_blobs),) * 2, max_cost * 10 + 1e3)
+    pad[:n_tracks, :n_blobs] = np.minimum(cost, max_cost * 10 + 1e2)
+    row_ind, col_ind = _hungarian_solve(pad)
+    pairs = []
+    for r, c in zip(row_ind, col_ind):
+        if r < n_tracks and c < n_blobs and cost[r, c] <= max_cost:
+            pairs.append((int(r), int(c)))
+    return pairs
+
 
 class Tracker:
     """
-    Nearest-neighbour centroid tracker with hysteresis crossing detection for circular quadrants.
+    Multi-object tracker: Kalman-filtered centroids + Hungarian assignment,
+    with hysteresis crossing detection for circular quadrants.
 
-    Each track carries a pending-crossing counter.  When an ant's centroid
-    moves between quadrants or inside/outside the circle, we start counting frames 
-    in the new state. Only after CROSS_HYSTERESIS_FRAMES consecutive frames in 
-    the new state do we commit the crossing as an event.
+    Each frame:
+      1. Predict all track positions with Kalman filters.
+      2. Build a cost matrix (Euclidean distance, gated by max_dist).
+      3. Hungarian algorithm assigns blobs to tracks globally.
+      4. Matched tracks get a Kalman measurement update; unmatched tracks coast
+         on prediction until max_missing, then are removed.
 
-    Tracks direction-based entries/exits for each quadrant (NE, SE, SW, NW).
+    Crossing events (enter/exit per quadrant) use the same hysteresis logic as before.
     """
 
     def __init__(self, max_dist: float, max_missing_frames: int,
@@ -279,6 +345,26 @@ class Tracker:
         self._ants: dict = {}
         # id → {cx, cy, missing, committed_inside, committed_quadrant, pending_inside, pending_quadrant, pending_count}
         self._next_id: int = 0
+
+    def _sync_track_state(self, ant: dict) -> None:
+        kf = ant["kf"]
+        ant["cx"], ant["cy"] = float(kf.x[0]), float(kf.x[1])
+        ant["vx"], ant["vy"] = float(kf.x[2]), float(kf.x[3])
+
+    def _new_track(self, blob: dict, inside: bool, quadrant: str) -> dict:
+        kf = KalmanFilter2D(blob["cx"], blob["cy"])
+        return {
+            "kf": kf,
+            "cx": blob["cx"], "cy": blob["cy"],
+            "vx": 0.0, "vy": 0.0,
+            "missing": 0,
+            "age": 0,
+            "committed_inside": inside,
+            "committed_quadrant": quadrant,
+            "pending_inside": inside,
+            "pending_quadrant": quadrant,
+            "pending_count": 0,
+        }
 
     # ------------------------------------------------------------------
     def update(self, blobs: list, circle_params) -> list:
@@ -292,90 +378,79 @@ class Tracker:
         """
         if not circle_params:
             return []
-            
+
+        cx, cy = circle_params["center"]
+        radius = circle_params["radius"]
+        north_angle = circle_params["north_angle"]
+
         events = []
-        matched_ant_ids: set = set()
-        matched_blob_idx: set = set()
+        track_ids = list(self._ants.keys())
 
-        # ── match existing tracks to nearest unmatched blob ──────────
-        for ant_id, ant in list(self._ants.items()):
-            best_d, best_i = self.max_dist, -1
-            for i, blob in enumerate(blobs):
-                if i in matched_blob_idx:
-                    continue
+        # ── 1. Kalman predict ─────────────────────────────────────────
+        predictions = {}
+        for ant_id in track_ids:
+            px, py = self._ants[ant_id]["kf"].predict()
+            predictions[ant_id] = (px, py)
+            self._sync_track_state(self._ants[ant_id])
 
-                if ant["missing"] > 2 and blob["area"] < MIN_BLOB_AREA * 3:
-                    continue
+        # ── 2. Cost matrix + Hungarian match ──────────────────────────
+        n_tracks = len(track_ids)
+        n_blobs = len(blobs)
+        matched_track_rows: set[int] = set()
+        matched_blob_cols: set[int] = set()
 
-                d = math.hypot(blob["cx"] - ant["cx"], blob["cy"] - ant["cy"])
-                if d < best_d:
-                    best_d, best_i = d, i
-            
-            if best_i >= 0:
-                matched_ant_ids.add(ant_id)
-                matched_blob_idx.add(best_i)
-                ant["age"] +=1
-                # ant["cx"] = blobs[best_i]["cx"]
-                # ant["cy"] = blobs[best_i]["cy"]
+        if n_tracks and n_blobs:
+            cost = np.full((n_tracks, n_blobs), self.max_dist * 100.0, dtype=np.float64)
+            for ri, ant_id in enumerate(track_ids):
+                ant = self._ants[ant_id]
+                px, py = predictions[ant_id]
+                for bi, blob in enumerate(blobs):
+                    if ant["missing"] > 2 and blob["area"] < MIN_BLOB_AREA * 3:
+                        continue
+                    d = math.hypot(blob["cx"] - px, blob["cy"] - py)
+                    if d <= self.max_dist:
+                        cost[ri, bi] = d
 
-                alpha = 0.6
-                beta = 0.3
-
-                new_cx = blobs[best_i]["cx"]
-                new_cy = blobs[best_i]["cy"]
-                
-                ant["vx"] = beta * (new_cx - ant["cx"]) + (1 - beta) * ant["vx"]
-                ant["vy"] = beta * (new_cy - ant["cy"]) + (1 - beta) * ant["vy"]
-
-                ant["cx"] = alpha * new_cx + (1 - alpha) * ant["cx"]
-                ant["cy"] = alpha * new_cy + (1 - alpha) * ant["cy"]
+            for ri, bi in _hungarian_match(cost, self.max_dist):
+                matched_track_rows.add(ri)
+                matched_blob_cols.add(bi)
+                ant_id = track_ids[ri]
+                ant = self._ants[ant_id]
+                blob = blobs[bi]
+                ant["kf"].update(blob["cx"], blob["cy"])
                 ant["missing"] = 0
+                ant["age"] += 1
+                self._sync_track_state(ant)
 
-        # ── age out long-lost tracks ──────────────────────────────────
+        matched_ant_ids = {track_ids[ri] for ri in matched_track_rows}
 
-        MIN_COAST_AGE = 8
-        
-        for ant_id in list(self._ants.keys()):
-            if ant_id not in matched_ant_ids:
-                self._ants[ant_id]["missing"] += 1
-                if self._ants[ant_id]["missing"] > self.max_missing:
-                    del self._ants[ant_id]
-                
-                elif self._ants[ant_id]["age"] >= MIN_COAST_AGE:
-                    self._ants[ant_id]["cx"] += self._ants[ant_id]["vx"]
-                    self._ants[ant_id]["cy"] += self._ants[ant_id]["vy"]
-                    self._ants[ant_id]["vx"] *= 0.8
-                    self._ants[ant_id]["vy"] *= 0.8
-                else:
-                    del self._ants[ant_id]
+        # ── 3. Unmatched tracks: coast or delete ──────────────────────
+        for ant_id in track_ids:
+            if ant_id in matched_ant_ids:
+                continue
+            ant = self._ants[ant_id]
+            ant["missing"] += 1
+            if ant["missing"] > self.max_missing:
+                del self._ants[ant_id]
+            elif ant["age"] < MIN_COAST_AGE:
+                del self._ants[ant_id]
+            else:
+                # Position already advanced by predict(); keep vx, vy from KF
+                self._sync_track_state(ant)
 
-
-        # ── create new tracks for unmatched blobs ────────────────────
-        cx, cy = circle_params['center']
-        radius = circle_params['radius']
-        north_angle = circle_params['north_angle']
-        
-        for i, blob in enumerate(blobs):
-            if i in matched_blob_idx:
+        # ── 4. New tracks for unmatched detections ────────────────────
+        for bi, blob in enumerate(blobs):
+            if bi in matched_blob_cols:
                 continue
             inside = is_inside_circle(cx, cy, blob["cx"], blob["cy"], radius)
-            quadrant = get_quadrant(cx, cy, blob["cx"], blob["cy"], north_angle) if not inside else "CENTER"
-            
-            self._ants[self._next_id] = {
-                "cx": blob["cx"], "cy": blob["cy"],
-                "vx": 0.0, "vy": 0.0, 
-                "missing": 0,
-                "age": 0,
-                "committed_inside": inside,
-                "committed_quadrant": quadrant,
-                "pending_inside": inside,
-                "pending_quadrant": quadrant,
-                "pending_count": 0,
-            }
+            quadrant = (
+                get_quadrant(cx, cy, blob["cx"], blob["cy"], north_angle)
+                if not inside else "CENTER"
+            )
+            self._ants[self._next_id] = self._new_track(blob, inside, quadrant)
             self._next_id += 1
 
         # ── hysteresis crossing detection ────────────────────────────
-        MIN_CROSS_AGE = 8
 
         for ant_id, ant in self._ants.items():
             if ant["age"] < MIN_CROSS_AGE:
@@ -387,53 +462,40 @@ class Tracker:
                 if not current_inside else "CENTER"
             )
 
-            # Check if ant state changed (inside/outside or quadrant)
             current_state = (current_inside, current_quadrant)
             pending_state = (ant["pending_inside"], ant["pending_quadrant"])
             committed_state = (ant["committed_inside"], ant["committed_quadrant"])
 
             if current_state == pending_state:
-                # Still accumulating toward the same candidate state
                 ant["pending_count"] += 1
             else:
-                # State changed — start accumulating toward the new state
                 ant["pending_inside"] = current_inside
                 ant["pending_quadrant"] = current_quadrant
                 ant["pending_count"] = 1
 
-            # Commit once we've been in the new state long enough
-            if (ant["pending_count"] >= self.hyst and pending_state != committed_state):
-                # Generate event based on transition
+            if ant["pending_count"] >= self.hyst and pending_state != committed_state:
                 old_inside, old_quadrant = committed_state
                 new_inside, new_quadrant = pending_state
-                
-                # Update committed state
+
                 ant["committed_inside"] = new_inside
                 ant["committed_quadrant"] = new_quadrant
-                
-                # Generate appropriate event
+
                 if old_inside and not new_inside:
-                    # Ant moving from center to a quadrant = entering that quadrant
-                    event_type = f"enter_{new_quadrant}"
                     events.append({
-                        "ant_id": ant_id, 
-                        "event": event_type,
-                        "cx": ant["cx"], 
+                        "ant_id": ant_id,
+                        "event": f"enter_{new_quadrant}",
+                        "cx": ant["cx"],
                         "cy": ant["cy"],
-                        "quadrant": new_quadrant
+                        "quadrant": new_quadrant,
                     })
                 elif not old_inside and new_inside:
-                    # Ant moving from a quadrant to center = exiting that quadrant
-                    event_type = f"exit_{old_quadrant}"
                     events.append({
-                        "ant_id": ant_id, 
-                        "event": event_type,
-                        "cx": ant["cx"], 
+                        "ant_id": ant_id,
+                        "event": f"exit_{old_quadrant}",
+                        "cx": ant["cx"],
                         "cy": ant["cy"],
-                        "quadrant": old_quadrant
+                        "quadrant": old_quadrant,
                     })
-                # Note: Direct quadrant-to-quadrant transitions (without crossing circle boundary)
-                # are ignored - we only count circle boundary crossings
 
         return events
 
