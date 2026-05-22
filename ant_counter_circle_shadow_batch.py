@@ -52,6 +52,7 @@ from ant_counter_circle_shadow import (
     VideoProcessor,
     Tracker,
     cluster_blobs,
+    build_shadow_mask,
     angle_deg_from_center_to_point,
     draw_quadrant_arcs,
     PROCESS_SCALE,
@@ -60,7 +61,7 @@ from ant_counter_circle_shadow import (
     MIN_BLOB_AREA,
     MAX_BLOB_AREA,
     MAX_TRACK_DIST,
-    MAX_MISSING_SEC,
+    MAX_COAST_FRAMES,
     CROSS_HYSTERESIS_FRAMES,
     VIBRATION_PCT,
 )
@@ -106,7 +107,7 @@ class BatchVideoProcessor(VideoProcessor):
                         fps, total, csv_path, vid_path):
         tracker = Tracker(
             max_dist=MAX_TRACK_DIST,
-            max_missing_frames=int(MAX_MISSING_SEC * fps),
+            max_missing_frames=MAX_COAST_FRAMES,
             hysteresis_frames=CROSS_HYSTERESIS_FRAMES,
         )
 
@@ -140,7 +141,8 @@ class BatchVideoProcessor(VideoProcessor):
                 break
 
             small = cv2.resize(frame, (proc_w, proc_h))
-            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+            gray = hsv[:, :, 2]
 
             frame_buf.append(gray.copy())
             if len(frame_buf) > FRAME_STRIDE + 1:
@@ -152,9 +154,13 @@ class BatchVideoProcessor(VideoProcessor):
             else:
                 diff = np.zeros((proc_h, proc_w), dtype=np.uint8)
 
+            shadow_mask = build_shadow_mask(small)
+            diff = cv2.bitwise_and(diff, cv2.bitwise_not(shadow_mask))
+
             _, mask = cv2.threshold(diff, DIFF_THRESH, 255, cv2.THRESH_BINARY)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_open)
+            mask = cv2.bitwise_and(mask, cv2.bitwise_not(shadow_mask))
 
             n_fg = int(np.count_nonzero(mask))
             if n_fg > vibration_limit:
@@ -171,7 +177,7 @@ class BatchVideoProcessor(VideoProcessor):
                             "cy": centroids[i][1],
                             "area": int(area),
                         })
-                blobs = cluster_blobs(blobs, max_dist=15)
+                blobs = cluster_blobs(blobs, max_dist=40)
 
             events = tracker.update(blobs, circle_proc)
             ts = fid / fps
@@ -217,6 +223,8 @@ class BatchVideoProcessor(VideoProcessor):
             draw_quadrant_arcs(out, (int(cx), int(cy)), int(radius), north_angle)
 
             for ant_id, ant in tracker.ants().items():
+                if ant["missing"] > 0:
+                    continue
                 ax, ay = int(ant["cx"]), int(ant["cy"])
                 in_hyst = (
                     (ant["committed_inside"] != ant["pending_inside"])
