@@ -79,11 +79,11 @@ def cluster_blobs(blobs, max_dist=15):
             clusters.append({"cx": cx, "cy": cy, "area": area})
     return clusters
 
-def build_shadow_mask(frame_bgr, kernel_size=31):
+def build_shadow_mask(frame_bgr, kernel_size=61):
 
-    SHADOW_VAL_DROP = 40
+    SHADOW_VAL_DROP = 22
 
-    SHADOW_HUE_STABLE = 15
+    SHADOW_HUE_STABLE = 20
 
 
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV).astype(np.int32)
@@ -102,10 +102,38 @@ def build_shadow_mask(frame_bgr, kernel_size=31):
     shadow_raw = (val_drop & hue_stable).astype(np.uint8) * 255
 
     # Clean up speckle
-    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     shadow_clean = cv2.morphologyEx(shadow_raw, cv2.MORPH_OPEN, k_open)
 
     return shadow_clean
+
+def separate_shadow_blobs(blobs, shadow_mask, min_shadow_overlap=0.4):
+    """
+    Given blobs and a shadow mask, return (ant_blobs, shadow_blobs).
+    A blob is classified as shadow if >min_shadow_overlap fraction of its
+    bounding box pixels are in the shadow mask.
+    """
+    ant_blobs = []
+    shadow_blobs = []
+    for b in blobs:
+        # Sample shadow mask at blob centroid neighborhood
+        cx, cy = int(b["cx"]), int(b["cy"])
+        r = max(3, int(math.sqrt(b["area"] / math.pi)))
+        y1 = max(0, cy - r)
+        y2 = min(shadow_mask.shape[0], cy + r)
+        x1 = max(0, cx - r)
+        x2 = min(shadow_mask.shape[1], cx + r)
+        region = shadow_mask[y1:y2, x1:x2]
+        if region.size == 0:
+            ant_blobs.append(b)
+            continue
+        shadow_frac = np.count_nonzero(region) / region.size
+        if shadow_frac >= min_shadow_overlap:
+            shadow_blobs.append(b)
+        else:
+            ant_blobs.append(b)
+    
+    return ant_blobs, shadow_blobs
 
 
 # ── Processing parameters (tune these if detection is noisy) ─────────────────
@@ -697,7 +725,6 @@ class VideoProcessor:
             _, mask = cv2.threshold(diff, DIFF_THRESH, 255, cv2.THRESH_BINARY)
             mask  = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
             mask  = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
-            mask = cv2.bitwise_and(mask, cv2.bitwise_not(shadow_mask))
 
             # ── vibration guard ───────────────────────────────────────
             # If the whole frame moved (wind shake), skip blob detection
@@ -717,8 +744,8 @@ class VideoProcessor:
                         blobs.append({"cx": centroids[i][0],
                                       "cy": centroids[i][1],
                                       "area": int(area)})
-                # Cluster blobs to reduce shadow double-counting (changed from 15 to 40)
-                blobs = cluster_blobs(blobs, max_dist=40)
+                ant_blobs, shadow_blobs = separate_shadow_blobs(blobs, shadow_mask)
+                blobs = cluster_blobs(ant_blobs, max_dist=15)
 
             # ── tracking & crossing detection ─────────────────────────
             events = tracker.update(blobs, circle_proc)
