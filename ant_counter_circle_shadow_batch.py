@@ -25,6 +25,7 @@ select that video in the queue (overrides the shared setup for that item only
 when "Use per-video circle if saved" is checked).
 """
 
+from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import cv2
