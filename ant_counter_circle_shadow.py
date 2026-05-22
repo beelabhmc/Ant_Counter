@@ -116,15 +116,16 @@ MIN_BLOB_AREA    = 15     # min blob area in pixels at PROCESS_SCALE
 MAX_BLOB_AREA    = 1200   # max blob area in pixels at PROCESS_SCALE
 MAX_TRACK_DIST   = 20     # max pixel distance to link blobs between frames
 
-# Persistence: how long to keep a track alive when its blob temporarily vanishes
-# (ant stops, enters the hole, passes through shadow).  2–3 s works well.
-MAX_MISSING_SEC  = 2.5 # 
+# How long a lost track stays in memory (no draw, no match, no crossings).
+# Short coast only — long persistence let shadows re-attach and fake crossings.
+MAX_COAST_FRAMES = 4
 
-# Crossing hysteresis: an ant must be on the same side of the circle boundary
-# for this many consecutive frames before the crossing is committed.
-# Prevents spurious counts when an ant hovers on the boundary or tracking hiccups.
-# At 60 fps, 6 frames = 0.1 s.  Raise if you see double-counts at the edge.
-CROSS_HYSTERESIS_FRAMES = 6
+# Consecutive frames with a real blob match before crossings are allowed.
+MIN_MATCH_STREAK = 10
+
+# Crossing hysteresis: must stay on the same side this many matched frames.
+# At 60 fps, 8 frames ≈ 0.13 s.
+CROSS_HYSTERESIS_FRAMES = 8
 
 # Camera-vibration guard: if >VIBRATION_PCT % of pixels change simultaneously,
 # it's a whole-frame shake → skip detection for that frame (don't count blobs)
@@ -266,10 +267,7 @@ def draw_quadrant_arcs(frame, center, radius, north_angle_deg):
 KF_PROC_POS = 2.0      # position process noise
 KF_PROC_VEL = 8.0      # velocity process noise
 KF_MEAS_POS = 6.0      # measurement noise (centroid observation)
-MIN_COAST_AGE = 8      # frames before a lost track may persist (re-acquire flicker)
-MIN_CROSS_AGE = 8      # frames before crossing events are counted
-# Lost tracks stay in memory up to max_missing for re-acquire, but position
-# is frozen and they are not drawn / counted once missing > 0.
+MIN_TRACK_AGE = 8      # frames before a young track is kept when briefly lost
 
 
 class KalmanFilter2D:
@@ -368,6 +366,9 @@ class Tracker:
             "pending_quadrant": quadrant,
             "pending_count": 0,
             "matched_this_frame": True,
+            "match_streak": 1,
+            "meas_cx": blob["cx"],
+            "meas_cy": blob["cy"],
         }
 
     def _freeze_lost_track(self, ant: dict) -> None:
@@ -381,7 +382,7 @@ class Tracker:
         ant["vx"] = 0.0
         ant["vy"] = 0.0
         ant["matched_this_frame"] = False
-        # Do not let coasted frames (or re-acquire) commit a stale crossing.
+        ant["match_streak"] = 0
         ant["pending_count"] = 0
         ant["pending_inside"] = ant["committed_inside"]
         ant["pending_quadrant"] = ant["committed_quadrant"]
@@ -408,30 +409,29 @@ class Tracker:
         north_angle = circle_params["north_angle"]
 
         events = []
-        track_ids = list(self._ants.keys())
+        all_track_ids = list(self._ants.keys())
         self._mark_all_unmatched()
 
-        # ── 1. Kalman predict (only for tracks seen last frame) ───────
-        predictions = {}
-        for ant_id in track_ids:
-            ant = self._ants[ant_id]
-            if ant["missing"] == 0:
-                px, py = ant["kf"].predict()
-            else:
-                px, py = ant["last_cx"], ant["last_cy"]
-            predictions[ant_id] = (px, py)
-            if ant["missing"] == 0:
-                self._sync_track_state(ant)
+        # Only actively tracked (not coasting) ids may match new blobs.
+        active_ids = [tid for tid in all_track_ids if self._ants[tid]["missing"] == 0]
 
-        # ── 2. Cost matrix + Hungarian match ──────────────────────────
-        n_tracks = len(track_ids)
+        # ── 1. Kalman predict (active tracks only) ────────────────────
+        predictions = {}
+        for ant_id in active_ids:
+            ant = self._ants[ant_id]
+            px, py = ant["kf"].predict()
+            predictions[ant_id] = (px, py)
+            self._sync_track_state(ant)
+
+        # ── 2. Cost matrix + Hungarian match (active tracks only) ─────
+        n_tracks = len(active_ids)
         n_blobs = len(blobs)
         matched_track_rows: set[int] = set()
         matched_blob_cols: set[int] = set()
 
         if n_tracks and n_blobs:
             cost = np.full((n_tracks, n_blobs), self.max_dist * 100.0, dtype=np.float64)
-            for ri, ant_id in enumerate(track_ids):
+            for ri, ant_id in enumerate(active_ids):
                 ant = self._ants[ant_id]
                 px, py = predictions[ant_id]
                 for bi, blob in enumerate(blobs):
@@ -444,7 +444,7 @@ class Tracker:
             for ri, bi in _hungarian_match(cost, self.max_dist):
                 matched_track_rows.add(ri)
                 matched_blob_cols.add(bi)
-                ant_id = track_ids[ri]
+                ant_id = active_ids[ri]
                 ant = self._ants[ant_id]
                 blob = blobs[bi]
                 ant["kf"].update(blob["cx"], blob["cy"])
@@ -453,19 +453,22 @@ class Tracker:
                 self._sync_track_state(ant)
                 ant["last_cx"] = ant["cx"]
                 ant["last_cy"] = ant["cy"]
+                ant["meas_cx"] = blob["cx"]
+                ant["meas_cy"] = blob["cy"]
                 ant["matched_this_frame"] = True
+                ant["match_streak"] = ant.get("match_streak", 0) + 1
 
-        matched_ant_ids = {track_ids[ri] for ri in matched_track_rows}
+        matched_ant_ids = {active_ids[ri] for ri in matched_track_rows}
 
-        # ── 3. Unmatched tracks: coast or delete ──────────────────────
-        for ant_id in track_ids:
+        # ── 3. Unmatched tracks: freeze briefly, then delete ──────────
+        for ant_id in all_track_ids:
             if ant_id in matched_ant_ids:
                 continue
             ant = self._ants[ant_id]
             ant["missing"] += 1
             if ant["missing"] > self.max_missing:
                 del self._ants[ant_id]
-            elif ant["age"] < MIN_COAST_AGE:
+            elif ant["age"] < MIN_TRACK_AGE:
                 del self._ants[ant_id]
             else:
                 self._freeze_lost_track(ant)
@@ -482,31 +485,36 @@ class Tracker:
             self._ants[self._next_id] = self._new_track(blob, inside, quadrant)
             self._next_id += 1
 
-        # ── hysteresis crossing detection (detected blobs only, never coast) ──
+        # ── hysteresis crossing (live blob match + streak, never coast) ──
 
         for ant_id, ant in self._ants.items():
-            if (ant["age"] < MIN_CROSS_AGE
-                    or ant["missing"] > 0
-                    or not ant.get("matched_this_frame", False)):
+            if (not ant.get("matched_this_frame", False)
+                    or ant.get("match_streak", 0) < MIN_MATCH_STREAK
+                    or ant["missing"] > 0):
                 continue
 
-            current_inside = is_inside_circle(cx, cy, ant["cx"], ant["cy"], radius)
+            px = ant.get("meas_cx", ant["cx"])
+            py = ant.get("meas_cy", ant["cy"])
+            current_inside = is_inside_circle(cx, cy, px, py, radius)
             current_quadrant = (
-                get_quadrant(cx, cy, ant["cx"], ant["cy"], north_angle)
+                get_quadrant(cx, cy, px, py, north_angle)
                 if not current_inside else "CENTER"
             )
 
             current_state = (current_inside, current_quadrant)
             pending_state = (ant["pending_inside"], ant["pending_quadrant"])
+            pending_state = (ant["pending_inside"], ant["pending_quadrant"])
+            pending_state = (ant["pending_inside"], ant["pending_quadrant"])
             committed_state = (ant["committed_inside"], ant["committed_quadrant"])
 
-            if current_state == pending_state:
+            if current_state == (ant["pending_inside"], ant["pending_quadrant"]):
                 ant["pending_count"] += 1
             else:
                 ant["pending_inside"] = current_inside
                 ant["pending_quadrant"] = current_quadrant
                 ant["pending_count"] = 1
 
+            pending_state = (ant["pending_inside"], ant["pending_quadrant"])
             if (ant["pending_count"] >= self.hyst
                     and pending_state != committed_state):
                 old_inside, old_quadrant = committed_state
@@ -624,7 +632,7 @@ class VideoProcessor:
                         fps, total, csv_path, vid_path):
         tracker = Tracker(
             max_dist=MAX_TRACK_DIST,
-            max_missing_frames=int(MAX_MISSING_SEC * fps),
+            max_missing_frames=MAX_COAST_FRAMES,
             hysteresis_frames=CROSS_HYSTERESIS_FRAMES,
         )
         #total = min(total, int(fps * 60))   # first 60 seconds only
@@ -683,11 +691,12 @@ class VideoProcessor:
                 diff = np.zeros((proc_h, proc_w), dtype=np.uint8)
                 raw_diff = diff
 
+            shadow_mask = build_shadow_mask(small)
+            diff = cv2.bitwise_and(diff, cv2.bitwise_not(shadow_mask))
+
             _, mask = cv2.threshold(diff, DIFF_THRESH, 255, cv2.THRESH_BINARY)
             mask  = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
             mask  = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
-
-            shadow_mask = build_shadow_mask(small)
             mask = cv2.bitwise_and(mask, cv2.bitwise_not(shadow_mask))
 
             # ── vibration guard ───────────────────────────────────────
