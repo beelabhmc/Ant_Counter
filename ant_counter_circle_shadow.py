@@ -25,6 +25,7 @@ Outputs (per video):
     <name>_polygon.json     — bounding polygon coordinates
 """
 
+from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import cv2
@@ -140,20 +141,20 @@ def separate_shadow_blobs(blobs, shadow_mask, min_shadow_overlap=0.4):
 PROCESS_SCALE    = 0.25   # resize factor: 4K→960×540 for processing
 DIFF_THRESH      = 15     # motion threshold — higher = fewer blobs (was 12, see notes)
 FRAME_STRIDE     = 2      # compare frame t to frame t-STRIDE
-MIN_BLOB_AREA    = 15     # min blob area in pixels at PROCESS_SCALE
+MIN_BLOB_AREA    = 30     # min blob area in pixels at PROCESS_SCALE
 MAX_BLOB_AREA    = 1200   # max blob area in pixels at PROCESS_SCALE
-MAX_TRACK_DIST   = 20     # max pixel distance to link blobs between frames
+MAX_TRACK_DIST   = 35     # max pixel distance to link blobs between frames
 
 # How long a lost track stays in memory (no draw, no match, no crossings).
 # Short coast only — long persistence let shadows re-attach and fake crossings.
 MAX_COAST_FRAMES = 4
 
 # Consecutive frames with a real blob match before crossings are allowed.
-MIN_MATCH_STREAK = 10
+MIN_MATCH_STREAK = 5
 
 # Crossing hysteresis: must stay on the same side this many matched frames.
 # At 60 fps, 8 frames ≈ 0.13 s.
-CROSS_HYSTERESIS_FRAMES = 8
+CROSS_HYSTERESIS_FRAMES = 4
 
 # Camera-vibration guard: if >VIBRATION_PCT % of pixels change simultaneously,
 # it's a whole-frame shake → skip detection for that frame (don't count blobs)
@@ -292,9 +293,9 @@ def draw_quadrant_arcs(frame, center, radius, north_angle_deg):
 
 
 # Kalman tuning (constant-velocity model in image pixels at PROCESS_SCALE)
-KF_PROC_POS = 2.0      # position process noise
+KF_PROC_POS = 20.0      # position process noise
 KF_PROC_VEL = 8.0      # velocity process noise
-KF_MEAS_POS = 6.0      # measurement noise (centroid observation)
+KF_MEAS_POS = 3.0      # measurement noise (centroid observation)
 MIN_TRACK_AGE = 8      # frames before a young track is kept when briefly lost
 
 
