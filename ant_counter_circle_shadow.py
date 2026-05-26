@@ -80,61 +80,90 @@ def cluster_blobs(blobs, max_dist=15):
             clusters.append({"cx": cx, "cy": cy, "area": area})
     return clusters
 
-def build_shadow_mask(frame_bgr, kernel_size=61):
+# def build_shadow_mask(frame_bgr, kernel_size=61):
 
-    SHADOW_VAL_DROP = 22
+#     SHADOW_VAL_DROP = 22
 
-    SHADOW_HUE_STABLE = 20
+#     SHADOW_HUE_STABLE = 20
 
 
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV).astype(np.int32)
-    h, s, v = hsv[:,:,0], hsv[:,:,1], hsv[:,:,2]
+#     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV).astype(np.int32)
+#     h, s, v = hsv[:,:,0], hsv[:,:,1], hsv[:,:,2]
 
-    # Local neighbourhood average using a large blur — this is our
-    # estimate of what the pixel "should" look like without a shadow
-    k = kernel_size | 1   # ensure odd
-    v_local_avg = cv2.blur(v.astype(np.float32), (k, k))
-    h_local_avg = cv2.blur(h.astype(np.float32), (k, k))
+#     # Local neighbourhood average using a large blur — this is our
+#     # estimate of what the pixel "should" look like without a shadow
+#     k = kernel_size | 1   # ensure odd
+#     v_local_avg = cv2.blur(v.astype(np.float32), (k, k))
+#     h_local_avg = cv2.blur(h.astype(np.float32), (k, k))
 
-    # Shadow condition: value dropped a lot, but hue stayed similar
-    val_drop  = (v_local_avg - v.astype(np.float32)) > SHADOW_VAL_DROP
-    hue_stable = np.abs(h.astype(np.float32) - h_local_avg) < SHADOW_HUE_STABLE
+#     # Shadow condition: value dropped a lot, but hue stayed similar
+#     val_drop  = (v_local_avg - v.astype(np.float32)) > SHADOW_VAL_DROP
+#     hue_stable = np.abs(h.astype(np.float32) - h_local_avg) < SHADOW_HUE_STABLE
 
-    shadow_raw = (val_drop & hue_stable).astype(np.uint8) * 255
+#     shadow_raw = (val_drop & hue_stable).astype(np.uint8) * 255
 
-    # Clean up speckle
-    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    shadow_clean = cv2.morphologyEx(shadow_raw, cv2.MORPH_OPEN, k_open)
+#     # Clean up speckle
+#     k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+#     shadow_clean = cv2.morphologyEx(shadow_raw, cv2.MORPH_OPEN, k_open)
 
-    return shadow_clean
+#     return shadow_clean
 
-def separate_shadow_blobs(blobs, shadow_mask, min_shadow_overlap=0.4):
+def compute_hsv_diff(frame1_bgr, frame2_bgr):
     """
-    Given blobs and a shadow mask, return (ant_blobs, shadow_blobs).
-    A blob is classified as shadow if >min_shadow_overlap fraction of its
-    bounding box pixels are in the shadow mask.
+    Frame difference using V and S channels weighted by ant/shadow separation.
+    Returns a single-channel diff image.
     """
-    ant_blobs = []
-    shadow_blobs = []
-    for b in blobs:
-        # Sample shadow mask at blob centroid neighborhood
-        cx, cy = int(b["cx"]), int(b["cy"])
-        r = max(3, int(math.sqrt(b["area"] / math.pi)))
-        y1 = max(0, cy - r)
-        y2 = min(shadow_mask.shape[0], cy + r)
-        x1 = max(0, cx - r)
-        x2 = min(shadow_mask.shape[1], cx + r)
-        region = shadow_mask[y1:y2, x1:x2]
-        if region.size == 0:
-            ant_blobs.append(b)
-            continue
-        shadow_frac = np.count_nonzero(region) / region.size
-        if shadow_frac >= min_shadow_overlap:
-            shadow_blobs.append(b)
-        else:
-            ant_blobs.append(b)
+    hsv1 = cv2.cvtColor(frame1_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv2 = cv2.cvtColor(frame2_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+
+    # V channel: ants ~200+, shadows ~50 — huge separation, weight heavily
+    v_diff = np.abs(hsv2[:,:,2] - hsv1[:,:,2])
+
+    # S channel: ants ~115-252, shadows ~100 — moderate separation
+    s_diff = np.abs(hsv2[:,:,1] - hsv1[:,:,1])
+
+    # H channel: nearly identical for both — don't use it for diff
+    # Weighted combination: V dominates
+    combined = (0.75 * v_diff + 0.25 * s_diff).astype(np.uint8)
+    return combined
+
+def build_ant_color_gate(frame1_bgr, frame2_bgr):
+    """Gate passes if either frame looks ant-colored — catches leading edges."""
+    hsv1 = cv2.cvtColor(frame1_bgr, cv2.COLOR_BGR2HSV)
+    hsv2 = cv2.cvtColor(frame2_bgr, cv2.COLOR_BGR2HSV)
+    lower = np.array([0,  80, 120], dtype=np.uint8)
+    upper = np.array([25, 255, 255], dtype=np.uint8)
+    gate1 = cv2.inRange(hsv1, lower, upper)
+    gate2 = cv2.inRange(hsv2, lower, upper)
+    return cv2.bitwise_or(gate1, gate2)  # pass if ant-colored in either frame
+
+# def separate_shadow_blobs(blobs, shadow_mask, min_shadow_overlap=0.4):
+#     """
+#     Given blobs and a shadow mask, return (ant_blobs, shadow_blobs).
+#     A blob is classified as shadow if >min_shadow_overlap fraction of its
+#     bounding box pixels are in the shadow mask.
+#     """
+#     ant_blobs = []
+#     shadow_blobs = []
+#     for b in blobs:
+#         # Sample shadow mask at blob centroid neighborhood
+#         cx, cy = int(b["cx"]), int(b["cy"])
+#         r = max(3, int(math.sqrt(b["area"] / math.pi)))
+#         y1 = max(0, cy - r)
+#         y2 = min(shadow_mask.shape[0], cy + r)
+#         x1 = max(0, cx - r)
+#         x2 = min(shadow_mask.shape[1], cx + r)
+#         region = shadow_mask[y1:y2, x1:x2]
+#         if region.size == 0:
+#             ant_blobs.append(b)
+#             continue
+#         shadow_frac = np.count_nonzero(region) / region.size
+#         if shadow_frac >= min_shadow_overlap:
+#             shadow_blobs.append(b)
+#         else:
+#             ant_blobs.append(b)
     
-    return ant_blobs, shadow_blobs
+#     return ant_blobs, shadow_blobs
 
 
 # ── Processing parameters (tune these if detection is noisy) ─────────────────
@@ -703,29 +732,29 @@ class VideoProcessor:
 
             # ── resize + grayscale ────────────────────────────────────
             small = cv2.resize(frame, (proc_w, proc_h))
-            # gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-            hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-            gray = hsv[:,:,2]
+            # # gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            # hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+            # gray = hsv[:,:,2]
 
-            # ── frame-to-frame diff ───────────────────────────────────
-            frame_buf.append(gray.copy())
+            # ── HSV frame-to-frame diff ───────────────────────────────────────
+            frame_buf.append(small.copy())   # store full BGR, not gray
             if len(frame_buf) > FRAME_STRIDE + 1:
                 frame_buf.pop(0)
 
             if len(frame_buf) > FRAME_STRIDE:
-                # Pre-blur reduces single-pixel speckle before thresholding
-                raw_diff = cv2.absdiff(gray, frame_buf[0])
-                diff = cv2.GaussianBlur(raw_diff, (3, 3), 0)
+                diff = compute_hsv_diff(frame_buf[0], small)
+                diff = cv2.GaussianBlur(diff, (3, 3), 0)
             else:
                 diff = np.zeros((proc_h, proc_w), dtype=np.uint8)
-                raw_diff = diff
 
-            shadow_mask = build_shadow_mask(small)
-            diff = cv2.bitwise_and(diff, cv2.bitwise_not(shadow_mask))
+            # ── Color gate: only keep motion where pixels look like ants ─────
+            ant_gate = build_ant_color_gate(small)
 
+            # Apply gate to diff — shadow motion gets zeroed out
             _, mask = cv2.threshold(diff, DIFF_THRESH, 255, cv2.THRESH_BINARY)
-            mask  = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
-            mask  = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
+            mask = cv2.bitwise_and(mask, ant_gate)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
 
             # ── vibration guard ───────────────────────────────────────
             # If the whole frame moved (wind shake), skip blob detection
@@ -745,8 +774,8 @@ class VideoProcessor:
                         blobs.append({"cx": centroids[i][0],
                                       "cy": centroids[i][1],
                                       "area": int(area)})
-                ant_blobs, shadow_blobs = separate_shadow_blobs(blobs, shadow_mask)
-                blobs = cluster_blobs(ant_blobs, max_dist=15)
+                # ant_blobs, shadow_blobs = separate_shadow_blobs(blobs, shadow_mask)
+                blobs = cluster_blobs(blobs, max_dist=15)
 
             # ── tracking & crossing detection ─────────────────────────
             events = tracker.update(blobs, circle_proc)
