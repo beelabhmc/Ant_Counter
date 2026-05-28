@@ -108,24 +108,39 @@ def cluster_blobs(blobs, max_dist=15):
 
 #     return shadow_clean
 
-def compute_hsv_diff(frame1_bgr, frame2_bgr):
-    """
-    Frame difference using V and S channels weighted by ant/shadow separation.
-    Returns a single-channel diff image.
-    """
+# def compute_hsv_diff(frame1_bgr, frame2_bgr):
+#     """
+#     Frame difference using V and S channels weighted by ant/shadow separation.
+#     Returns a single-channel diff image.
+#     """
+#     hsv1 = cv2.cvtColor(frame1_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+#     hsv2 = cv2.cvtColor(frame2_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+
+#     # # V channel: ants ~200+, shadows ~50 — huge separation, weight heavily
+#     # v_diff = np.abs(hsv2[:,:,2] - hsv1[:,:,2])
+
+#     # # S channel: ants ~115-252, shadows ~100 — moderate separation
+#     # s_diff = np.abs(hsv2[:,:,1] - hsv1[:,:,1])
+
+#     h_diff = np.abs(hsv2[:,:,0] - hsv1[:,:,0])
+
+#     h_diff = np.minimum(h_diff, 180-h_diff)
+
+#     # H channel: nearly identical for both — don't use it for diff
+#     # Weighted combination: V dominates
+#     combined = (h_diff * (255/90)).clip(0,255).astype(np.uint8)
+#     return combined
+
+LD1_VEC = np.array([-0.0097, +0.0106, 0.0081])
+
+
+def compute_ld1_diff(frame1_bgr, frame2_bgr):
     hsv1 = cv2.cvtColor(frame1_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
     hsv2 = cv2.cvtColor(frame2_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
 
-    # V channel: ants ~200+, shadows ~50 — huge separation, weight heavily
-    v_diff = np.abs(hsv2[:,:,2] - hsv1[:,:,2])
+    diff = np.abs(((hsv2-hsv1) * LD1_VEC).sum(axis=2))
 
-    # S channel: ants ~115-252, shadows ~100 — moderate separation
-    s_diff = np.abs(hsv2[:,:,1] - hsv1[:,:,1])
-
-    # H channel: nearly identical for both — don't use it for diff
-    # Weighted combination: V dominates
-    combined = (0.75 * v_diff + 0.25 * s_diff).astype(np.uint8)
-    return combined
+    return (diff * (255/30)).clip(0,255).astype(np.uint8)
 
 def build_ant_color_gate(frame1_bgr, frame2_bgr):
     """Gate passes if either frame looks ant-colored — catches leading edges."""
@@ -742,17 +757,17 @@ class VideoProcessor:
                 frame_buf.pop(0)
 
             if len(frame_buf) > FRAME_STRIDE:
-                diff = compute_hsv_diff(frame_buf[0], small)
+                diff = compute_ld1_diff(frame_buf[0], small)
                 diff = cv2.GaussianBlur(diff, (3, 3), 0)
             else:
                 diff = np.zeros((proc_h, proc_w), dtype=np.uint8)
 
             # ── Color gate: only keep motion where pixels look like ants ─────
-            ant_gate = build_ant_color_gate(small)
+            # ant_gate = build_ant_color_gate(frame_buf[0],small)
 
             # Apply gate to diff — shadow motion gets zeroed out
             _, mask = cv2.threshold(diff, DIFF_THRESH, 255, cv2.THRESH_BINARY)
-            mask = cv2.bitwise_and(mask, ant_gate)
+            # mask = cv2.bitwise_and(mask, ant_gate)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
 
