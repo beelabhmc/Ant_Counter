@@ -440,14 +440,6 @@ class BatchApp:
             qf, text="0 videos", font=("Arial", 8), fg="#444")
         self._queue_count_lbl.pack(anchor=tk.W, padx=4, pady=(0, 4))
 
-        self._use_saved_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            qf,
-            text="Use per-video circle if saved in outputs/",
-            variable=self._use_saved_var,
-            font=("Arial", 8), anchor=tk.W,
-        ).pack(anchor=tk.W, padx=4, pady=(0, 4))
-
         # Preview frame scrub
         ff = ttk.LabelFrame(sidebar, text="  Preview frame  ")
         ff.pack(fill=tk.X, pady=4)
@@ -460,7 +452,7 @@ class BatchApp:
         self._frame_lbl.pack()
 
         # Circle setup
-        cf = ttk.LabelFrame(sidebar, text="  Circle setup (shared)  ")
+        cf = ttk.LabelFrame(sidebar, text="  Circle setup  ")
         cf.pack(fill=tk.X, pady=4)
         tk.Label(cf,
                  text=("1st click: center\n"
@@ -479,6 +471,17 @@ class BatchApp:
             radius_frame, from_=50, to=500, textvariable=self._radius_var,
             width=8, command=self._on_radius_change,
         ).pack(side=tk.LEFT, padx=(5, 0))
+
+        assign_row = tk.Frame(cf)
+        assign_row.pack(fill=tk.X, padx=4, pady=2)
+        self._assign_btn = tk.Button(
+            assign_row, text="Assign to this video",
+            command=self._assign_circle_to_video, state=tk.DISABLED)
+        self._assign_btn.pack(side=tk.LEFT, padx=1)
+        self._clear_assign_btn = tk.Button(
+            assign_row, text="Clear assignment",
+            command=self._clear_video_assignment, state=tk.DISABLED)
+        self._clear_assign_btn.pack(side=tk.LEFT, padx=1)
 
         cfg_row = tk.Frame(cf)
         cfg_row.pack(fill=tk.X, padx=4, pady=2)
@@ -546,10 +549,9 @@ class BatchApp:
             if path in self.video_queue:
                 continue
             self.video_queue.append(path)
-            if self._use_saved_var.get():
-                saved = _load_circle_json(_stem_circle_path(path))
-                if saved:
-                    self._per_video_circles[path] = saved
+            saved = _load_circle_json(_stem_circle_path(path))
+            if saved:
+                self._per_video_circles[path] = saved
             added += 1
         self._refresh_queue_ui()
         if added and self.preview_path is None and self.video_queue:
@@ -610,9 +612,7 @@ class BatchApp:
         self._queue_list.delete(0, tk.END)
         for path in self.video_queue:
             name = os.path.basename(path)
-            tag = ""
-            if self._use_saved_var.get() and path in self._per_video_circles:
-                tag = " [saved circle]"
+            tag = " [circle assigned]" if path in self._per_video_circles else " [uses shared]" if self.circle_complete else " [NO CIRCLE]"
             self._queue_list.insert(tk.END, name + tag)
         n = len(self.video_queue)
         self._queue_count_lbl.config(text=f"{n} video{'s' if n != 1 else ''}")
@@ -621,7 +621,14 @@ class BatchApp:
         sel = self._queue_list.curselection()
         if not sel:
             return
-        self._preview_video(self.video_queue[sel[0]])
+        path = self.video_queue[sel[0]]
+        self._preview_video(path)
+        # Load this video's assigned circle into the display, if it has one
+        if path in self._per_video_circles:
+            self._apply_circle_params(self._per_video_circles[path])
+            self._circle_lbl.config(
+                text=f"Circle: assigned to {os.path.basename(path)}", fg="#006600")
+        self._refresh_assign_btns()
 
     # ── Preview ──────────────────────────────────────────────────────────────
 
@@ -735,8 +742,9 @@ class BatchApp:
         elif self.north_point is None:
             self.north_point = (vx, vy)
             self.circle_complete = True
-            self._circle_lbl.config(text="Circle ready", fg="#006600")
+            self._circle_lbl.config(text="Circle ready — assign to a video or use as shared", fg="#006600")
             self._refresh_proc_btn()
+            self._refresh_assign_btns()
         self._render()
 
     def _rclick(self, _event):
@@ -751,6 +759,7 @@ class BatchApp:
         if self.current_bgr is not None:
             self._render()
         self._refresh_proc_btn()
+        self._refresh_assign_btns()
 
     def _on_radius_change(self):
         self.circle_radius = float(self._radius_var.get())
@@ -821,6 +830,7 @@ class BatchApp:
         if self.current_bgr is not None:
             self._render()
         self._refresh_proc_btn()
+        self._refresh_assign_btns()
 
     def _shared_circle_params(self) -> dict | None:
         if not self.circle_complete:
@@ -829,25 +839,69 @@ class BatchApp:
             self.circle_center, self.circle_radius, self.north_point)
 
     def _circle_for_video(self, video_path: str) -> dict | None:
-        if self._use_saved_var.get() and video_path in self._per_video_circles:
+        if video_path in self._per_video_circles:
             return self._per_video_circles[video_path]
         return self._shared_circle_params()
 
+    def _assign_circle_to_video(self):
+        if not self.circle_complete or not self.preview_path:
+            return
+        params = _circle_params_dict(
+            self.circle_center, self.circle_radius, self.north_point)
+        self._per_video_circles[self.preview_path] = params
+        # Also save to disk in outputs/
+        out_dir = os.path.join(os.path.dirname(self.preview_path), "outputs")
+        os.makedirs(out_dir, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(self.preview_path))[0]
+        circle_path = os.path.join(out_dir, f"{stem}_circle.json")
+        with open(circle_path, "w") as f:
+            json.dump({"circle_params": params}, f, indent=2)
+        self._circle_lbl.config(
+            text=f"Circle: assigned to {os.path.basename(self.preview_path)}",
+            fg="#006600")
+        self._refresh_queue_ui()
+        self._refresh_assign_btns()
+        self._refresh_proc_btn()
+
+    def _clear_video_assignment(self):
+        if not self.preview_path:
+            return
+        self._per_video_circles.pop(self.preview_path, None)
+        self._circle_lbl.config(text="Circle cleared for this video", fg="#664400")
+        self._refresh_queue_ui()
+        self._refresh_assign_btns()
+        self._refresh_proc_btn()
+
+    def _refresh_assign_btns(self):
+        has_preview = self.preview_path is not None and not self._batch_running
+        has_assignment = self.preview_path in self._per_video_circles if self.preview_path else False
+        self._assign_btn.config(
+            state=tk.NORMAL if (has_preview and self.circle_complete) else tk.DISABLED)
+        self._clear_assign_btn.config(
+            state=tk.NORMAL if (has_preview and has_assignment) else tk.DISABLED)
+
     def _refresh_proc_btn(self):
-        ok = bool(self.video_queue and self.circle_complete and not self._batch_running)
+        all_have_circle = bool(self.video_queue) and all(
+            self._circle_for_video(p) for p in self.video_queue)
+        ok = all_have_circle and not self._batch_running
         self._proc_btn.config(state=tk.NORMAL if ok else tk.DISABLED)
 
     # ── Batch processing ─────────────────────────────────────────────────────
 
     def start_batch(self):
-        if not self.video_queue or not self.circle_complete:
+        if not self.video_queue:
             return
         missing = [p for p in self.video_queue if not self._circle_for_video(p)]
         if missing:
+            names = "\n".join(os.path.basename(p) for p in missing[:5])
+            if len(missing) > 5:
+                names += f"\n…and {len(missing) - 5} more"
             messagebox.showerror(
                 "Circle missing",
-                "Some videos have no circle (shared or saved).\n"
-                "Define a shared circle or ensure saved circle JSON exists.")
+                f"These videos have no circle assigned and no shared circle is set:\n\n"
+                f"{names}\n\n"
+                "Select each video in the queue, set a circle, and click\n"
+                "\"Assign to this video\" — or define a shared circle for all.")
             return
         self._batch_cancel = False
         self._batch_running = True
