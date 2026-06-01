@@ -131,16 +131,16 @@ def cluster_blobs(blobs, max_dist=15):
 #     combined = (h_diff * (255/90)).clip(0,255).astype(np.uint8)
 #     return combined
 
-LD1_VEC = np.array([-0.0097, +0.0106, 0.0081])
+LD1_VEC = np.array([0.00469, -0.01605, -0.01250])
 
 
 def compute_ld1_diff(frame1_bgr, frame2_bgr):
     hsv1 = cv2.cvtColor(frame1_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
     hsv2 = cv2.cvtColor(frame2_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
 
-    diff = np.abs(((hsv2-hsv1) * LD1_VEC).sum(axis=2))
+    diff = np.abs(np.dot(hsv2-hsv1, LD1_VEC))
 
-    return (diff * (255/30)).clip(0,255).astype(np.uint8)
+    return (diff * 62.12).clip(0,255).astype(np.uint8)
 
 def build_ant_color_gate(frame1_bgr, frame2_bgr):
     """Gate passes if either frame looks ant-colored — catches leading edges."""
@@ -183,11 +183,11 @@ def build_ant_color_gate(frame1_bgr, frame2_bgr):
 
 # ── Processing parameters (tune these if detection is noisy) ─────────────────
 PROCESS_SCALE    = 0.25   # resize factor: 4K→960×540 for processing
-DIFF_THRESH      = 15     # motion threshold — higher = fewer blobs (was 12, see notes)
+DIFF_THRESH      = 37    # motion threshold — higher = fewer blobs (was 12, see notes)
 FRAME_STRIDE     = 2      # compare frame t to frame t-STRIDE
-MIN_BLOB_AREA    = 30     # min blob area in pixels at PROCESS_SCALE
+MIN_BLOB_AREA    = 100    # min blob area in pixels at PROCESS_SCALE
 MAX_BLOB_AREA    = 1200   # max blob area in pixels at PROCESS_SCALE
-MAX_TRACK_DIST   = 35     # max pixel distance to link blobs between frames
+MAX_TRACK_DIST   = 50     # max pixel distance to link blobs between frames
 
 # How long a lost track stays in memory (no draw, no match, no crossings).
 # Short coast only — long persistence let shadows re-attach and fake crossings.
