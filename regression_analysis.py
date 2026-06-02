@@ -60,7 +60,7 @@ def load_predictions(search_dirs: list[str]) -> pd.DataFrame:
     rows = []
     for base in search_dirs:
         for summary_path in sorted(glob.glob(
-                os.path.join(base, "**", "output", "*_summary.csv"), recursive=True)):
+                os.path.join(base, "**", "rep_sample/outputs", "*_summary.csv"), recursive=True)):
             stem = os.path.basename(summary_path).replace("_summary.csv", "")
             with open(summary_path, newline="") as f:
                 for row in csv.DictReader(f):
@@ -303,6 +303,8 @@ def main():
         merged["squared_error"] = (merged["predicted"] - merged["ground_truth"]) ** 2
         merged.to_csv(RESULTS_CSV_PATH, index=False)
         print(f"\n  Saved merged results to:\n  {RESULTS_CSV_PATH}")
+    
+    plot_regression(merged, result)
 
 
 if __name__ == "__main__":

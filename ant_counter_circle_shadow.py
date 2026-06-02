@@ -183,9 +183,9 @@ def build_ant_color_gate(frame1_bgr, frame2_bgr):
 
 # ── Processing parameters (tune these if detection is noisy) ─────────────────
 PROCESS_SCALE    = 0.25   # resize factor: 4K→960×540 for processing
-DIFF_THRESH      = 37    # motion threshold — higher = fewer blobs (was 12, see notes)
+DIFF_THRESH      = 40    # motion threshold — higher = fewer blobs (was 12, see notes)
 FRAME_STRIDE     = 2      # compare frame t to frame t-STRIDE
-MIN_BLOB_AREA    = 100    # min blob area in pixels at PROCESS_SCALE
+MIN_BLOB_AREA    = 50    # min blob area in pixels at PROCESS_SCALE
 MAX_BLOB_AREA    = 1200   # max blob area in pixels at PROCESS_SCALE
 MAX_TRACK_DIST   = 50     # max pixel distance to link blobs between frames
 
@@ -600,7 +600,7 @@ class Tracker:
                 if old_inside and not new_inside:
                     events.append({
                         "ant_id": ant_id,
-                        "event": f"enter_{new_quadrant}",
+                        "event": f"exit_{new_quadrant}",
                         "cx": ant["cx"],
                         "cy": ant["cy"],
                         "quadrant": new_quadrant,
@@ -608,7 +608,7 @@ class Tracker:
                 elif not old_inside and new_inside:
                     events.append({
                         "ant_id": ant_id,
-                        "event": f"exit_{old_quadrant}",
+                        "event": f"enter_{old_quadrant}",
                         "cx": ant["cx"],
                         "cy": ant["cy"],
                         "quadrant": old_quadrant,
