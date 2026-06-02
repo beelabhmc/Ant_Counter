@@ -42,13 +42,6 @@ GROUND_TRUTH_CSV = os.path.join(_SCRIPT_DIR, "Representative Sample Counts - She
 # Searches recursively inside each directory listed here
 SEARCH_DIRS = [_SCRIPT_DIR]
 
-# What to regress: "enters", "exits", or "net" (enters - exits)
-COUNT_TYPE = "enters"
-
-# True  → one data point per quadrant per video (4× more points)
-# False → one data point per video (total across all quadrants)
-PER_QUADRANT = False
-
 # Save merged predictions + ground truth to a CSV for further inspection
 SAVE_RESULTS_CSV = True
 RESULTS_CSV_PATH = os.path.join(_SCRIPT_DIR, "regression_results.csv")
@@ -57,40 +50,29 @@ _QUADRANTS = ("NE", "SE", "SW", "NW")
 
 # ── Load predictions ──────────────────────────────────────────────────────────
 
-def load_predictions(search_dirs: list[str], per_quadrant: bool) -> pd.DataFrame:
+def load_predictions(search_dirs: list[str]) -> pd.DataFrame:
     """
     Find all output/*_summary.csv files under search_dirs and load them.
-    Returns a DataFrame with columns: stem, [quadrant,] pred_enters, pred_exits, pred_net.
+    Returns a long DataFrame with one row per (stem, quadrant, direction),
+    where direction is 'enters' or 'exits'.
+    Columns: stem, quadrant, direction, predicted.
     """
     rows = []
     for base in search_dirs:
         for summary_path in sorted(glob.glob(
                 os.path.join(base, "**", "output", "*_summary.csv"), recursive=True)):
             stem = os.path.basename(summary_path).replace("_summary.csv", "")
-            enters_by_q: dict[str, int] = {}
-            exits_by_q:  dict[str, int] = {}
-
             with open(summary_path, newline="") as f:
                 for row in csv.DictReader(f):
                     q = row["quadrant"].strip()
                     if q == "TOTAL":
                         continue
-                    enters_by_q[q] = int(row["enters"])
-                    exits_by_q[q]  = int(row["exits"])
-
-            if per_quadrant:
-                for q in _QUADRANTS:
-                    e = enters_by_q.get(q, 0)
-                    x = exits_by_q.get(q, 0)
                     rows.append({"stem": stem, "quadrant": q,
-                                 "pred_enters": e, "pred_exits": x,
-                                 "pred_net": e - x})
-            else:
-                total_e = sum(enters_by_q.values())
-                total_x = sum(exits_by_q.values())
-                rows.append({"stem": stem,
-                             "pred_enters": total_e, "pred_exits": total_x,
-                             "pred_net": total_e - total_x})
+                                 "direction": "enters",
+                                 "predicted": int(row["enters"])})
+                    rows.append({"stem": stem, "quadrant": q,
+                                 "direction": "exits",
+                                 "predicted": int(row["exits"])})
 
     if not rows:
         raise FileNotFoundError(
@@ -102,7 +84,7 @@ def load_predictions(search_dirs: list[str], per_quadrant: bool) -> pd.DataFrame
 
 # ── Load ground truth ─────────────────────────────────────────────────────────
 
-def load_ground_truth(csv_path: str, per_quadrant: bool) -> pd.DataFrame:
+def load_ground_truth(csv_path: str) -> pd.DataFrame:
     """
     Load 'Representative Sample Counts' CSV.
 
@@ -111,153 +93,154 @@ def load_ground_truth(csv_path: str, per_quadrant: bool) -> pd.DataFrame:
         NW Enter, NW Exit, NE Enter, NE Exit,
         SW Enter, SW Exit, SE Enter, SE Exit
 
-    Returns a DataFrame with: stem, [quadrant,] gt_enters, gt_exits, gt_net.
+    Returns a long DataFrame with one row per (stem, quadrant, direction).
+    Columns: stem, quadrant, direction, ground_truth.
     """
     if not os.path.isfile(csv_path):
         raise FileNotFoundError(f"Ground truth file not found:\n  {csv_path}")
 
     df = pd.read_csv(csv_path)
-    # Normalise column names: strip whitespace, lowercase
     df.columns = [c.strip() for c in df.columns]
 
     if "Video Title" not in df.columns:
         raise ValueError(
             f"Expected a 'Video Title' column. Found: {list(df.columns)}")
 
-    df["stem"] = df["Video Title"].astype(str).str.strip()
-
-    # Parse per-quadrant counts from "NE Enter", "NE Exit", … columns
     rows = []
     for _, row in df.iterrows():
+        stem = str(row["Video Title"]).strip()
         for q in _QUADRANTS:
-            e_col = f"{q} Enter"
-            x_col = f"{q} Exit"
-            e = int(pd.to_numeric(row.get(e_col, 0), errors="coerce") or 0)
-            x = int(pd.to_numeric(row.get(x_col, 0), errors="coerce") or 0)
-            rows.append({"stem": row["stem"], "quadrant": q,
-                         "gt_enters": e, "gt_exits": x, "gt_net": e - x})
+            e = int(pd.to_numeric(row.get(f"{q} Enter", 0), errors="coerce") or 0)
+            x = int(pd.to_numeric(row.get(f"{q} Exit",  0), errors="coerce") or 0)
+            rows.append({"stem": stem, "quadrant": q,
+                         "direction": "enters", "ground_truth": e})
+            rows.append({"stem": stem, "quadrant": q,
+                         "direction": "exits",  "ground_truth": x})
 
-    long_df = pd.DataFrame(rows)
-
-    if per_quadrant:
-        return long_df.reset_index(drop=True)
-    else:
-        total_df = (
-            long_df.groupby("stem", as_index=False)
-            .agg(gt_enters=("gt_enters", "sum"),
-                 gt_exits=("gt_exits",  "sum"))
-        )
-        total_df["gt_net"] = total_df["gt_enters"] - total_df["gt_exits"]
-        return total_df
+    return pd.DataFrame(rows)
 
 
 # ── Regression ────────────────────────────────────────────────────────────────
 
-def run_regression(merged: pd.DataFrame, count_type: str) -> dict:
+def run_regression(merged: pd.DataFrame) -> dict:
     """
-    Fit OLS linear regression: predicted ~ ground_truth.
+    Fit OLS linear regression: predicted ~ ground_truth across all
+    (stem, quadrant, direction) data points.
     Returns a dict of statistics plus the raw arrays for plotting.
     """
-    pred_col = f"pred_{count_type}"
-    gt_col   = f"gt_{count_type}"
-
-    x = merged[gt_col].values.astype(float)   # ground truth  (independent)
-    y = merged[pred_col].values.astype(float)  # predicted     (dependent)
+    x = merged["ground_truth"].values.astype(float)
+    y = merged["predicted"].values.astype(float)
 
     slope, intercept, r, p_value, std_err = stats.linregress(x, y)
     r2    = r ** 2
     y_hat = slope * x + intercept
+    sq_err = (y - x) ** 2          # squared error vs perfect prediction
     rmse  = np.sqrt(np.mean((y - y_hat) ** 2))
-    mae   = np.mean(np.abs(y - y_hat))
+    mae   = np.mean(np.abs(y - x))
 
     return dict(slope=slope, intercept=intercept, r2=r2, r=r,
                 p_value=p_value, std_err=std_err, rmse=rmse, mae=mae,
-                n=len(x), x=x, y=y, y_hat=y_hat,
-                pred_col=pred_col, gt_col=gt_col)
+                n=len(x), x=x, y=y, y_hat=y_hat, sq_err=sq_err)
 
 
 # ── Plot ──────────────────────────────────────────────────────────────────────
 
 _QUAD_COLORS = {
-    "NE": "gold", "SE": "limegreen",
-    "SW": "cornflowerblue", "NW": "violet",
+    "NE": "#e6b800",        # amber
+    "SE": "#2ca02c",        # green
+    "SW": "#1f77b4",        # blue
+    "NW": "#9467bd",        # purple
 }
+_DIR_MARKERS = {"enters": "o", "exits": "^"}   # circle = enters, triangle = exits
 
 
-def plot_regression(merged: pd.DataFrame, res: dict,
-                    count_type: str, per_quadrant: bool):
-    x, y, y_hat   = res["x"], res["y"], res["y_hat"]
-    slope, intercept = res["slope"], res["intercept"]
+def plot_regression(merged: pd.DataFrame, res: dict):
+    """
+    Two-panel figure:
+      Left  — ground truth vs predicted, coloured by quadrant,
+               shape by direction (enters ○ / exits △),
+               with the regression line and perfect y=x line.
+      Right — ground truth vs squared error (predicted − ground truth)²,
+               same colour/shape coding.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    slope     = res["slope"]
+    intercept = res["intercept"]
 
-    # ── Left: scatter + fit line ──────────────────────────────────────────────
-    ax = axes[0]
-
-    if per_quadrant:
+    for ax_idx, ax in enumerate(axes):
         for q in _QUADRANTS:
-            sub = merged[merged["quadrant"] == q]
-            ax.scatter(sub[res["gt_col"]], sub[res["pred_col"]],
-                       color=_QUAD_COLORS[q], label=q, s=70, zorder=3)
-    else:
-        ax.scatter(x, y, color="steelblue", s=70, zorder=3)
-        for _, row in merged.iterrows():
-            ax.annotate(row["stem"],
-                        (row[res["gt_col"]], row[res["pred_col"]]),
-                        fontsize=7, xytext=(5, 4), textcoords="offset points")
+            for direction, marker in _DIR_MARKERS.items():
+                sub = merged[
+                    (merged["quadrant"] == q) &
+                    (merged["direction"] == direction)
+                ]
+                if sub.empty:
+                    continue
 
-    # Regression line
-    x_line = np.linspace(x.min(), x.max(), 200)
-    ax.plot(x_line, slope * x_line + intercept, color="tomato", linewidth=2,
-            label=f"fit:  y = {slope:.2f}x + {intercept:.2f}")
+                gt  = sub["ground_truth"].values.astype(float)
+                pr  = sub["predicted"].values.astype(float)
+                sq  = (pr - gt) ** 2
 
-    # Perfect prediction (y = x)
-    all_vals = np.concatenate([x, y])
-    pad = max((all_vals.max() - all_vals.min()) * 0.1, 0.5)
-    lim = (all_vals.min() - pad, all_vals.max() + pad)
-    ax.plot(lim, lim, "k--", linewidth=1, alpha=0.4, label="perfect (y = x)")
+                label = f"{q} {direction}"
+                y_vals = pr if ax_idx == 0 else sq
 
-    ax.set_xlim(lim)
-    ax.set_ylim(lim)
-    ax.set_xlabel(f"Ground truth  ({count_type})")
-    ax.set_ylabel(f"Predicted  ({count_type})")
-    ax.set_title(f"Predicted vs Ground Truth — {count_type}")
-    ax.legend(fontsize=8)
-    ax.text(0.05, 0.95,
-            f"R² = {res['r2']:.3f}\n"
-            f"RMSE = {res['rmse']:.2f}\n"
-            f"MAE  = {res['mae']:.2f}\n"
-            f"n = {res['n']}",
-            transform=ax.transAxes, fontsize=9, verticalalignment="top",
-            bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.8))
+                sc = ax.scatter(gt, y_vals,
+                                color=_QUAD_COLORS[q],
+                                marker=marker,
+                                s=70, zorder=3,
+                                label=label)
 
-    # ── Right: residuals ──────────────────────────────────────────────────────
-    ax2 = axes[1]
-    residuals = y - y_hat
-    ax2.axhline(0, color="tomato", linewidth=1.5, linestyle="--")
+                # Label each point with its video stem
+                for _, row in sub.iterrows():
+                    y_val = row["predicted"] if ax_idx == 0 else (row["predicted"] - row["ground_truth"]) ** 2
+                    ax.annotate(row["stem"], (row["ground_truth"], y_val),
+                                fontsize=6, xytext=(4, 3),
+                                textcoords="offset points", color=_QUAD_COLORS[q])
 
-    if per_quadrant:
-        for q in _QUADRANTS:
-            sub = merged[merged["quadrant"] == q]
-            sub_x   = sub[res["gt_col"]].values.astype(float)
-            sub_res = sub[res["pred_col"]].values.astype(float) - (slope * sub_x + intercept)
-            ax2.scatter(sub_x, sub_res, color=_QUAD_COLORS[q], label=q, s=70)
-        ax2.legend(fontsize=8)
-    else:
-        ax2.scatter(x, residuals, color="steelblue", s=70)
-        for _, row in merged.iterrows():
-            gt  = row[res["gt_col"]]
-            res_ = row[res["pred_col"]] - (slope * gt + intercept)
-            ax2.annotate(row["stem"], (gt, res_),
-                         fontsize=7, xytext=(5, 4), textcoords="offset points")
+        if ax_idx == 0:
+            # Regression line
+            all_gt = merged["ground_truth"].values.astype(float)
+            all_pr = merged["predicted"].values.astype(float)
+            pad = max((all_gt.max() - all_gt.min()) * 0.12, 0.5)
+            xlim = (all_gt.min() - pad, all_gt.max() + pad)
+            ylim = (min(all_pr.min(), all_gt.min()) - pad,
+                    max(all_pr.max(), all_gt.max()) + pad)
 
-    ax2.set_xlabel(f"Ground truth  ({count_type})")
-    ax2.set_ylabel("Residual  (predicted − fitted)")
-    ax2.set_title("Residual plot")
+            x_line = np.linspace(xlim[0], xlim[1], 200)
+            ax.plot(x_line, slope * x_line + intercept,
+                    color="tomato", linewidth=2,
+                    label=f"fit: y={slope:.2f}x+{intercept:.2f}")
+            ax.plot(xlim, xlim, "k--", linewidth=1, alpha=0.4, label="perfect (y=x)")
+            ax.set_xlim(xlim)
+            ax.set_ylim(ylim)
+            ax.set_ylabel("Predicted count")
+            ax.set_title("Predicted vs Ground Truth")
+            ax.text(0.05, 0.95,
+                    f"R²   = {res['r2']:.3f}\n"
+                    f"RMSE = {res['rmse']:.2f}\n"
+                    f"MAE  = {res['mae']:.2f}\n"
+                    f"n    = {res['n']}",
+                    transform=ax.transAxes, fontsize=9, verticalalignment="top",
+                    bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.8))
+        else:
+            all_gt = merged["ground_truth"].values.astype(float)
+            all_pr = merged["predicted"].values.astype(float)
+            all_sq = (all_pr - all_gt) ** 2
+            pad_x = max((all_gt.max() - all_gt.min()) * 0.12, 0.5)
+            pad_y = max(all_sq.max() * 0.08, 0.1)
+            ax.set_xlim(all_gt.min() - pad_x, all_gt.max() + pad_x)
+            ax.set_ylim(-pad_y, all_sq.max() + pad_y)
+            ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+            ax.set_ylabel("Squared error  (predicted − ground truth)²")
+            ax.set_title("Squared Error vs Ground Truth")
+
+        ax.set_xlabel("Ground truth count")
+        ax.legend(fontsize=7, ncol=2, loc="upper left",
+                  bbox_to_anchor=(0.0, 0.85) if ax_idx == 0 else (0.0, 1.0))
 
     plt.suptitle(
-        f"Linear regression — {count_type} — "
-        f"{'per quadrant' if per_quadrant else 'per video total'}",
+        "Regression analysis — enters ○  exits △  |  colour = quadrant",
         fontsize=11, fontweight="bold")
     plt.tight_layout()
     plt.show()
@@ -267,18 +250,17 @@ def plot_regression(merged: pd.DataFrame, res: dict,
 
 def main():
     print("Loading predictions…")
-    pred_df = load_predictions(SEARCH_DIRS, PER_QUADRANT)
+    pred_df = load_predictions(SEARCH_DIRS)
     print(f"  {pred_df['stem'].nunique()} video(s), "
           f"{len(pred_df)} prediction row(s) loaded.")
 
     print("Loading ground truth…")
-    gt_df = load_ground_truth(GROUND_TRUTH_CSV, PER_QUADRANT)
+    gt_df = load_ground_truth(GROUND_TRUTH_CSV)
     print(f"  {gt_df['stem'].nunique()} video(s), "
           f"{len(gt_df)} ground truth row(s) loaded.")
 
-    # Merge on stem (+ quadrant when per_quadrant=True)
-    join_keys = ["stem", "quadrant"] if PER_QUADRANT else ["stem"]
-    merged = pd.merge(pred_df, gt_df, on=join_keys, how="inner")
+    # Merge on stem + quadrant + direction
+    merged = pd.merge(pred_df, gt_df, on=["stem", "quadrant", "direction"], how="inner")
 
     if merged.empty:
         raise ValueError(
@@ -287,7 +269,8 @@ def main():
             f"  Ground truth stems: {sorted(gt_df['stem'].unique())}\n"
             "Check that 'Video Title' values match the output file name stems.")
 
-    print(f"  {len(merged)} row(s) matched.")
+    print(f"  {len(merged)} row(s) matched "
+          f"({merged['stem'].nunique()} videos × 4 quadrants × 2 directions).")
 
     unmatched_pred = set(pred_df["stem"]) - set(merged["stem"])
     unmatched_gt   = set(gt_df["stem"])   - set(merged["stem"])
@@ -296,8 +279,8 @@ def main():
     if unmatched_gt:
         print(f"  WARNING — ground truth with no predictions : {unmatched_gt}")
 
-    print(f"\nFitting linear regression on '{COUNT_TYPE}'…")
-    result = run_regression(merged, COUNT_TYPE)
+    print("\nFitting linear regression (all quadrants + directions combined)…")
+    result = run_regression(merged)
 
     print("\n── Results ───────────────────────────────────────────────────")
     print(f"  n          : {result['n']}")
@@ -317,10 +300,9 @@ def main():
         print("\n  ✓  Slope within 20% of 1.0 — counts are roughly proportional.")
 
     if SAVE_RESULTS_CSV:
+        merged["squared_error"] = (merged["predicted"] - merged["ground_truth"]) ** 2
         merged.to_csv(RESULTS_CSV_PATH, index=False)
         print(f"\n  Saved merged results to:\n  {RESULTS_CSV_PATH}")
-
-    plot_regression(merged, result, COUNT_TYPE, PER_QUADRANT)
 
 
 if __name__ == "__main__":
