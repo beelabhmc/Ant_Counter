@@ -138,9 +138,14 @@ def compute_ld1_diff(frame1_bgr, frame2_bgr):
     hsv1 = cv2.cvtColor(frame1_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
     hsv2 = cv2.cvtColor(frame2_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
 
+    h_diff = hsv2[:,:,0] - hsv1[:,:,0]
+
+    hsv2[:,:,0] = np.where(h_diff < -90, hsv2[:,:,0] + 180, hsv2[:,:,0])
+    hsv1[:,:,0] = np.where(h_diff >  90, hsv1[:,:,0] + 180, hsv1[:,:,0])
+
     diff = np.abs(np.dot(hsv2-hsv1, LD1_VEC))
 
-    return (diff * 62.12).clip(0,255).astype(np.uint8)
+    return (diff * (255/7.7024)).clip(0,255).astype(np.uint8)
 
 def build_ant_color_gate(frame1_bgr, frame2_bgr):
     """Gate passes if either frame looks ant-colored — catches leading edges."""
