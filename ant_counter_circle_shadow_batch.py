@@ -56,6 +56,10 @@ from ant_counter_circle_shadow import (
     cluster_blobs,
     angle_deg_from_center_to_point,
     draw_quadrant_arcs,
+    compute_hsv_diff,
+    build_ant_color_gate,
+    build_shadow_mask,
+    separate_shadow_blobs,
     PROCESS_SCALE,
     DIFF_THRESH,
     FRAME_STRIDE,
@@ -119,7 +123,7 @@ class BatchVideoProcessor(VideoProcessor):
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(vid_path, fourcc, fps, (proc_w, proc_h), True)
 
-        k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         frame_pixels = proc_w * proc_h
         vibration_limit = int(frame_pixels * VIBRATION_PCT / 100)
@@ -143,21 +147,30 @@ class BatchVideoProcessor(VideoProcessor):
 
             small = cv2.resize(frame, (proc_w, proc_h))
             # hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+            gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            shadow_mask = gray < 100
             # gray = hsv[:, :, 2]
 
-            frame_buf.append(small.copy())
+            frame_buf.append(gray.copy())
             if len(frame_buf) > FRAME_STRIDE + 1:
                 frame_buf.pop(0)
 
             if len(frame_buf) > FRAME_STRIDE:
-                diff = compute_ld1_diff(frame_buf[0], small)
-                diff = cv2.GaussianBlur(diff, (3, 3), 0)
+                # diff = compute_ld1_diff(frame_buf[0], small)
+                # diff = compute_hsv_diff(hsv, frame_buf[0])
+                diff = cv2.absdiff(gray, frame_buf[0])
+                # diff = cv2.GaussianBlur(diff, (3, 3), 0)
             else:
                 diff = np.zeros((proc_h, proc_w), dtype=np.uint8)
+            
+            # shadow_mask = build_shadow_mask(small)
+            # ant_gate = build_ant_color_gate(small)
 
             _, mask = cv2.threshold(diff, DIFF_THRESH, 255, cv2.THRESH_BINARY)
+            diff[shadow_mask] = 0
+            # mask = cv2.bitwise_and(mask, ant_gate)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_open)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
 
             n_fg = int(np.count_nonzero(mask))
             if n_fg > vibration_limit:
@@ -174,7 +187,8 @@ class BatchVideoProcessor(VideoProcessor):
                             "cy": centroids[i][1],
                             "area": int(area),
                         })
-                blobs = cluster_blobs(blobs, max_dist=40)
+                # blobs, shadow_blobs = separate_shadow_blobs(blobs, shadow_mask)
+                blobs = cluster_blobs(blobs, max_dist=15)
 
             events = tracker.update(blobs, circle_proc)
             ts = fid / fps
