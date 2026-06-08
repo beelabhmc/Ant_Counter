@@ -203,7 +203,7 @@ MAX_TRACK_DIST   = 50     # max pixel distance to link blobs between frames
 MAX_COAST_FRAMES = 4
 
 # Consecutive frames with a real blob match before crossings are allowed.
-MIN_MATCH_STREAK = 2
+MIN_MATCH_STREAK = 3
 
 # Crossing hysteresis: must stay on the same side this many matched frames.
 # At 60 fps, 8 frames ≈ 0.13 s.
@@ -346,7 +346,7 @@ def draw_quadrant_arcs(frame, center, radius, north_angle_deg):
 
 
 # Kalman tuning (constant-velocity model in image pixels at PROCESS_SCALE)
-KF_PROC_POS = 30.0      # position process noise
+KF_PROC_POS = 40.0     # position process noise
 KF_PROC_VEL = 8.0      # velocity process noise
 KF_MEAS_POS = 4.0      # measurement noise (centroid observation)
 MIN_TRACK_AGE = 8      # frames before a young track is kept when briefly lost

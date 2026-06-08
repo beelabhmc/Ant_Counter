@@ -148,7 +148,7 @@ class BatchVideoProcessor(VideoProcessor):
             small = cv2.resize(frame, (proc_w, proc_h))
             # hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
             gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-            shadow_mask = gray < 100
+            shadow_mask = gray < 110
             # gray = hsv[:, :, 2]
 
             frame_buf.append(gray.copy())
