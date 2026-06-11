@@ -213,6 +213,12 @@ CROSS_HYSTERESIS_FRAMES = 4
 # it's a whole-frame shake → skip detection for that frame (don't count blobs)
 VIBRATION_PCT    = 8.0    # percent of frame pixels; raise if too many skips
 
+# Buffer zone around the circle boundary (pixels at PROCESS_SCALE).
+# An ant must be this far inside OR outside the boundary before a crossing
+# is registered — prevents bouncing counts from ants lingering on the edge.
+# At PROCESS_SCALE=0.25 on 4K footage, 10 px here ≈ 40 px in the original.
+BUFFER_ZONE      = 10
+
 # ── Circular quadrant detection parameters ─────────────────────────────────
 DEFAULT_RADIUS   = 200    # Default circle radius in pixels
 QUAD_COLORS = {
@@ -577,7 +583,20 @@ class Tracker:
 
             px = ant.get("meas_cx", ant["cx"])
             py = ant.get("meas_cy", ant["cy"])
-            current_inside = is_inside_circle(cx, cy, px, py, radius)
+
+            # Buffer zone: ant must be BUFFER_ZONE pixels clear of the boundary
+            # in either direction before its inside/outside state can change.
+            # While it's in the buffer zone we keep the committed state so the
+            # hysteresis counter never starts — forcing a full crossing.
+            dist = math.hypot(px - cx, py - cy)
+            if dist < radius - BUFFER_ZONE:
+                current_inside = True
+            elif dist > radius + BUFFER_ZONE:
+                current_inside = False
+            else:
+                # Inside buffer zone — hold committed state, skip hysteresis update
+                current_inside = ant["committed_inside"]
+
             current_quadrant = (
                 get_quadrant(cx, cy, px, py, north_angle)
                 if not current_inside else "CENTER"
