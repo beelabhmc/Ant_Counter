@@ -36,7 +36,7 @@ from scipy import stats
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Path to the ground truth CSV
-GROUND_TRUTH_CSV = os.path.join(_SCRIPT_DIR, "Representative Sample Counts - Sheet1.csv")
+GROUND_TRUTH_CSV = os.path.join(_SCRIPT_DIR, "Natalie Thesis Data - Count Data Representative Sample.csv")
 
 # Folder(s) to search for output/*_summary.csv files
 # Searches recursively inside each directory listed here
@@ -60,7 +60,7 @@ def load_predictions(search_dirs: list[str]) -> pd.DataFrame:
     rows = []
     for base in search_dirs:
         for summary_path in sorted(glob.glob(
-                os.path.join(base, "**", "rep_sample/outputs", "*_summary.csv"), recursive=True)):
+                os.path.join(base, "**", "big_rep_sample", "*", "outputs", "*_summary.csv"), recursive=True)):
             stem = os.path.basename(summary_path).replace("_summary.csv", "")
             with open(summary_path, newline="") as f:
                 for row in csv.DictReader(f):
