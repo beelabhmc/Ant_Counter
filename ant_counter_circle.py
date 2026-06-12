@@ -67,6 +67,10 @@ CROSS_HYSTERESIS_FRAMES = 6
 # it's a whole-frame shake → skip detection for that frame (don't count blobs)
 VIBRATION_PCT    = 8.0    # percent of frame pixels; raise if too many skips
 
+BG_WEIGHT_B = 0.5
+
+BG_WEIGHT_G = 0.5
+
 # ── Circular quadrant detection parameters ─────────────────────────────────
 DEFAULT_RADIUS   = 200    # Default circle radius in pixels
 QUAD_COLORS = {
@@ -466,7 +470,11 @@ class VideoProcessor:
 
             # ── resize + grayscale ────────────────────────────────────
             small = cv2.resize(frame, (proc_w, proc_h))
-            gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            total_w = BG_WEIGHT_B + BG_WEIGHT_G
+
+            gray = cv2.addWeighted(small[:,:,0], BG_WEIGHT_B/total_w, small[:,:,1], BG_WEIGHT_G/total_w, 0).astype(np.uint8)
+            
+            # gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
             # ── frame-to-frame diff ───────────────────────────────────
             frame_buf.append(gray.copy())
