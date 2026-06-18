@@ -220,7 +220,8 @@ VIBRATION_PCT    = 8.0    # percent of frame pixels; raise if too many skips
 BUFFER_ZONE      = 10
 
 # ── Circular quadrant detection parameters ─────────────────────────────────
-DEFAULT_RADIUS   = 200    # Default circle radius in pixels
+DEFAULT_RADIUS   = 410    # Default circle radius in pixels
+_QUADRANTS = ("NE", "SE", "SW", "NW")
 QUAD_COLORS = {
     "NE": (0, 255, 255),   # yellow
     "SE": (0, 255, 0),     # green
@@ -676,7 +677,9 @@ class VideoProcessor:
 
     # ------------------------------------------------------------------
     def run(self):
-        """Main pipeline.  Returns (events, paths_dict) or (None, None)."""
+        """Main pipeline.  
+        Returns (events, enter_totals, exit_totals, paths_dict) 
+        or (None, None, None, None)."""
         cap = cv2.VideoCapture(self.video_path)
         fps      = cap.get(cv2.CAP_PROP_FPS)
         total    = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -716,21 +719,36 @@ class VideoProcessor:
         # Single-pass: frame-to-frame diff (no background estimation needed)
         csv_path = os.path.join(out_dir, f"{stem}_counts.csv")
         vid_path = os.path.join(out_dir, f"{stem}_counted.mp4")
+        summary_path = os.path.join(out_dir, f"{stem}_summary.csv")
         self.progress_cb(0, "Processing frames…")
         events = self._process_frames(
-            circle_proc, proc_w, proc_h, fps, total, csv_path, vid_path)
+            circle_proc, proc_w, proc_h, fps, total, 
+            csv_path, vid_path, summary_path)
+        
+        # Calculate summary counts per quadrant
+        enter_totals = {q: 0 for q in _QUADRANTS}
+        exit_totals = {q: 0 for q in _QUADRANTS}
+        for e in events:
+            quad = e["quadrant"]
+            if e["event"].startswith("enter_"):
+                enter_totals[quad] += 1
+            elif e["event"].startswith("exit_"):
+                exit_totals[quad] += 1
 
         if self._cancel:
-            return None, None
+            return None, None, None, None
 
-        return events, {
-            "csv": csv_path, "video": vid_path,
-            "circle": circle_path, "output_dir": out_dir,
+        return events, enter_totals, exit_totals, {
+            "csv": csv_path, 
+            "video": vid_path,
+            "circle": circle_path, 
+            "summary": summary_path,
+            "output_dir": out_dir,
         }
 
     # ------------------------------------------------------------------
     def _process_frames(self, circle_proc, proc_w, proc_h,
-                        fps, total, csv_path, vid_path):
+                        fps, total, csv_path, vid_path, summary_path):
         tracker = Tracker(
             max_dist=MAX_TRACK_DIST,
             max_missing_frames=MAX_COAST_FRAMES,
@@ -755,8 +773,9 @@ class VideoProcessor:
         vibration_limit = int(frame_pixels * VIBRATION_PCT / 100)
 
         all_events = []
-        # Track counts per quadrant direction
-        quad_counts = {"NE": 0, "SE": 0, "SW": 0, "NW": 0}
+        # Track entries and exits per quadrant to include in the CSV and summary.
+        enter_counts = {q: 0 for q in _QUADRANTS}
+        exit_counts = {q: 0 for q in _QUADRANTS}
         n_vibration_skips = 0
 
         # Ring buffer: diff frame t against frame t-FRAME_STRIDE.
@@ -764,7 +783,7 @@ class VideoProcessor:
 
         cap = cv2.VideoCapture(self.video_path)
         csv_rows = [["timestamp_s", "time", "frame", "event", "quadrant",
-                     "quad_count", "ant_id", "x_orig", "y_orig"]]
+                     "enter_count", "exit_count", "ant_id", "x_orig", "y_orig"]]
 
         for fid in range(total):
             if self._cancel:
@@ -780,7 +799,10 @@ class VideoProcessor:
             # hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
             # gray = hsv[:,:,2]
 
-            # ── HSV frame-to-frame diff ───────────────────────────────────────
+            # ── create shadow mask ───────────────────────────────────────
+            shadow_mask = gray < 110
+
+            # ── Frame-to-frame diff ───────────────────────────────────────
             frame_buf.append(gray.copy())   # store full BGR, not gray
             if len(frame_buf) > FRAME_STRIDE + 1:
                 frame_buf.pop(0)
@@ -798,6 +820,7 @@ class VideoProcessor:
 
             # Apply gate to diff — shadow motion gets zeroed out
             _, mask = cv2.threshold(diff, DIFF_THRESH, 255, cv2.THRESH_BINARY)
+            diff[shadow_mask] = 0
             # mask = cv2.bitwise_and(mask, ant_gate)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
@@ -831,14 +854,15 @@ class VideoProcessor:
             for ev in events:
                 quadrant = ev["quadrant"]
                 if ev["event"].startswith("enter_"):
-                    quad_counts[quadrant] += 1
+                    enter_counts[quadrant] += 1
                 elif ev["event"].startswith("exit_"):
-                    quad_counts[quadrant] -= 1
+                    exit_counts[quadrant] += 1
                     
                 rec = {
                     "timestamp_s": ts, "time": ts_str, "frame": fid,
                     "event": ev["event"], "quadrant": quadrant,
-                    "quad_count": quad_counts[quadrant],
+                    "enter_count": enter_counts[quadrant],
+                    "exit_count": exit_counts[quadrant],
                     "ant_id": ev["ant_id"],
                     "x_orig": ev["cx"] / PROCESS_SCALE,
                     "y_orig": ev["cy"] / PROCESS_SCALE,
@@ -846,7 +870,7 @@ class VideoProcessor:
                 all_events.append(rec)
                 csv_rows.append([
                     f"{ts:.3f}", ts_str, fid, ev["event"], quadrant,
-                    quad_counts[quadrant], ev["ant_id"],
+                    enter_counts[quadrant], exit_counts[quadrant], ev["ant_id"],
                     f"{rec['x_orig']:.1f}", f"{rec['y_orig']:.1f}",
                 ])
 
@@ -887,19 +911,18 @@ class VideoProcessor:
                     # Orange for all outside ants regardless of quadrant
                     color = (0, 165, 255)    # orange: outside ants
                     
-                r = 6
-                cv2.circle(out, (ax, ay), r, color, 2)
+                cv2.circle(out, (ax, ay), 6, color, 2)
                 cv2.circle(out, (ax, ay), 2, color, -1)
 
             # quadrant count box (top-left)
-            cv2.rectangle(out, (8, 8), (280, 120), (0, 0, 0), -1)
+            cv2.rectangle(out, (8, 8), (340, 120), (0, 0, 0), -1)
             y_offset = 25
-            for i, (quad, count) in enumerate(quad_counts.items()):
+            for i, quad in enumerate(_QUADRANTS):
                 color = QUAD_COLORS[quad]
-                sign = "+" if count >= 0 else ""
-                label = f"{quad}: {sign}{count}"
+                label = (f"{quad}  in:{enter_counts[quad]}  "
+                         f"out:{exit_counts[quad]}")
                 cv2.putText(out, label, (12, y_offset + i * 22),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
 
             # recent event flash (bottom-left, fades after 1 s)
             if all_events and fid - all_events[-1]["frame"] < fps:
@@ -907,15 +930,15 @@ class VideoProcessor:
                 event_name = last["event"]
                 quadrant = last["quadrant"]
                 if event_name.startswith("enter_"):
-                    ev_txt = f"▲ ENTER {quadrant}"
+                    ev_txt = f"ENTER {quadrant} (#{last['enter_count']})"
                     ev_col = (0, 255, 90)
                 elif event_name.startswith("exit_"):
-                    ev_txt = f"▼ EXIT {quadrant}"
+                    ev_txt = f"EXIT {quadrant} (#{last['exit_count']})"
                     ev_col = (50, 50, 255)
                 else:
                     ev_txt = event_name
                     ev_col = (255, 255, 255)
-                cv2.rectangle(out, (6, proc_h - 45), (250, proc_h - 8), (0, 0, 0), -1)
+                cv2.rectangle(out, (6, proc_h - 45), (300, proc_h - 8), (0, 0, 0), -1)
                 cv2.putText(out, ev_txt, (10, proc_h - 14),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.9, ev_col, 2, cv2.LINE_AA)
 
@@ -1304,24 +1327,16 @@ class App:
 
     def _thread_body(self):
         try:
-            events, paths = self.processor.run()
+            events, enter_totals, exit_totals, paths = self.processor.run()
             if events is None:
                 self._status("Cancelled.")
                 self.root.after(0, self._reset_btns)
                 return
-                
-            # Count events by quadrant
-            quad_totals = {"NE": 0, "SE": 0, "SW": 0, "NW": 0}
-            for e in events:
-                quad = e["quadrant"]
-                if e["event"].startswith("enter_"):
-                    quad_totals[quad] += 1
-                elif e["event"].startswith("exit_"):
-                    quad_totals[quad] -= 1
+
             
             msg_lines = ["Done!\n"]
-            for quad, count in quad_totals.items():
-                msg_lines.append(f"{quad}: {count:+d}")
+            # for quad, count in enter_totals.items():
+            #     msg_lines.append(f"{quad}: {count:+d}")
             msg_lines.extend([f"\nTotal events: {len(events)}", 
                              f"Saved to:\n{paths['output_dir']}"])
             
@@ -1331,7 +1346,8 @@ class App:
             self.root.after(0, lambda: self._prog_lbl.config(text="Complete!"))
         except Exception as exc:
             import traceback
-            self._status(f"⚠ Error:\n{exc}\n\n{traceback.format_exc()[:400]}")
+            self._status(f"⚠ Error: {type(exc)}\n{str(exc)}\n\n{traceback.format_exc()[:400]}")
+            raise
         finally:
             self.root.after(0, self._reset_btns)
 

@@ -75,226 +75,6 @@ _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
 _QUADRANTS = ("NE", "SE", "SW", "NW")
 
 
-class BatchVideoProcessor(VideoProcessor):
-    """
-    Like VideoProcessor but tracks enters and exits separately (not net count).
-    """
-
-    def run(self):
-        events, paths = super().run()
-        if events is None:
-            return None, None
-
-        enter_totals = {q: 0 for q in _QUADRANTS}
-        exit_totals = {q: 0 for q in _QUADRANTS}
-        for e in events:
-            q = e["quadrant"]
-            if e["event"].startswith("enter_"):
-                enter_totals[q] += 1
-            elif e["event"].startswith("exit_"):
-                exit_totals[q] += 1
-
-        stem = os.path.splitext(os.path.basename(self.video_path))[0]
-        summary_path = os.path.join(paths["output_dir"], f"{stem}_summary.csv")
-        with open(summary_path, "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["quadrant", "enters", "exits"])
-            for q in _QUADRANTS:
-                w.writerow([q, enter_totals[q], exit_totals[q]])
-            w.writerow(["TOTAL", sum(enter_totals.values()), sum(exit_totals.values())])
-
-        paths["summary"] = summary_path
-        paths["enter_totals"] = enter_totals
-        paths["exit_totals"] = exit_totals
-        return events, paths
-
-    def _process_frames(self, circle_proc, proc_w, proc_h,
-                        fps, total, csv_path, vid_path):
-        tracker = Tracker(
-            max_dist=MAX_TRACK_DIST,
-            max_missing_frames=MAX_COAST_FRAMES,
-            hysteresis_frames=CROSS_HYSTERESIS_FRAMES,
-        )
-
-        cx, cy = circle_proc["center"]
-        radius = circle_proc["radius"]
-        north_angle = circle_proc["north_angle"]
-
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(vid_path, fourcc, fps, (proc_w, proc_h), True)
-
-        k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        frame_pixels = proc_w * proc_h
-        vibration_limit = int(frame_pixels * VIBRATION_PCT / 100)
-
-        all_events = []
-        enter_counts = {q: 0 for q in _QUADRANTS}
-        exit_counts = {q: 0 for q in _QUADRANTS}
-        n_vibration_skips = 0
-        frame_buf: list = []
-
-        cap = cv2.VideoCapture(self.video_path)
-        csv_rows = [["timestamp_s", "time", "frame", "event", "quadrant",
-                     "enter_count", "exit_count", "ant_id", "x_orig", "y_orig"]]
-
-        for fid in range(total):
-            if self._cancel:
-                break
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            small = cv2.resize(frame, (proc_w, proc_h))
-            # hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-            gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-            shadow_mask = gray < 110
-            # gray = hsv[:, :, 2]
-
-            frame_buf.append(gray.copy())
-            if len(frame_buf) > FRAME_STRIDE + 1:
-                frame_buf.pop(0)
-
-            if len(frame_buf) > FRAME_STRIDE:
-                # diff = compute_ld1_diff(frame_buf[0], small)
-                # diff = compute_hsv_diff(hsv, frame_buf[0])
-                diff = cv2.absdiff(gray, frame_buf[0])
-                # diff = cv2.GaussianBlur(diff, (3, 3), 0)
-            else:
-                diff = np.zeros((proc_h, proc_w), dtype=np.uint8)
-            
-            # shadow_mask = build_shadow_mask(small)
-            # ant_gate = build_ant_color_gate(small)
-
-            _, mask = cv2.threshold(diff, DIFF_THRESH, 255, cv2.THRESH_BINARY)
-            diff[shadow_mask] = 0
-            # mask = cv2.bitwise_and(mask, ant_gate)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
-
-            n_fg = int(np.count_nonzero(mask))
-            if n_fg > vibration_limit:
-                n_vibration_skips += 1
-                blobs = []
-            else:
-                n_lbl, _, stats, centroids = cv2.connectedComponentsWithStats(mask)
-                blobs = []
-                for i in range(1, n_lbl):
-                    area = stats[i, cv2.CC_STAT_AREA]
-                    if MIN_BLOB_AREA <= area <= MAX_BLOB_AREA:
-                        blobs.append({
-                            "cx": centroids[i][0],
-                            "cy": centroids[i][1],
-                            "area": int(area),
-                        })
-                # blobs, shadow_blobs = separate_shadow_blobs(blobs, shadow_mask)
-                blobs = cluster_blobs(blobs, max_dist=15)
-
-            events = tracker.update(blobs, circle_proc)
-            ts = fid / fps
-            ts_str = str(timedelta(seconds=int(ts)))
-
-            for ev in events:
-                quadrant = ev["quadrant"]
-                if ev["event"].startswith("enter_"):
-                    enter_counts[quadrant] += 1
-                elif ev["event"].startswith("exit_"):
-                    exit_counts[quadrant] += 1
-
-                rec = {
-                    "timestamp_s": ts, "time": ts_str, "frame": fid,
-                    "event": ev["event"], "quadrant": quadrant,
-                    "enter_count": enter_counts[quadrant],
-                    "exit_count": exit_counts[quadrant],
-                    "ant_id": ev["ant_id"],
-                    "x_orig": ev["cx"] / PROCESS_SCALE,
-                    "y_orig": ev["cy"] / PROCESS_SCALE,
-                }
-                all_events.append(rec)
-                csv_rows.append([
-                    f"{ts:.3f}", ts_str, fid, ev["event"], quadrant,
-                    enter_counts[quadrant], exit_counts[quadrant],
-                    ev["ant_id"],
-                    f"{rec['x_orig']:.1f}", f"{rec['y_orig']:.1f}",
-                ])
-
-            out = small.copy()
-
-            inset_w = proc_w // 4
-            inset_h = proc_h // 4
-            diff_amp = np.clip(diff.astype(np.float32) * 5, 0, 255).astype(np.uint8)
-            diff_color = cv2.applyColorMap(diff_amp, cv2.COLORMAP_HOT)
-            inset = cv2.resize(diff_color, (inset_w, inset_h))
-            ix = proc_w - inset_w - 4
-            iy = 4
-            out[iy:iy + inset_h, ix:ix + inset_w] = inset
-            cv2.rectangle(out, (ix - 1, iy - 1), (ix + inset_w, iy + inset_h),
-                          (180, 180, 180), 1)
-
-            draw_quadrant_arcs(out, (int(cx), int(cy)), int(radius), north_angle)
-
-            for ant_id, ant in tracker.ants().items():
-                if ant["missing"] > 0:
-                    continue
-                ax, ay = int(ant["cx"]), int(ant["cy"])
-                in_hyst = (
-                    (ant["committed_inside"] != ant["pending_inside"])
-                    or (ant["committed_quadrant"] != ant["pending_quadrant"])
-                )
-                if in_hyst:
-                    color = (0, 220, 255)
-                elif ant["committed_inside"]:
-                    color = (255, 255, 255)
-                else:
-                    color = (0, 165, 255)
-                cv2.circle(out, (ax, ay), 6, color, 2)
-                cv2.circle(out, (ax, ay), 2, color, -1)
-
-            cv2.rectangle(out, (8, 8), (340, 120), (0, 0, 0), -1)
-            y_offset = 25
-            for i, quad in enumerate(_QUADRANTS):
-                color = QUAD_COLORS[quad]
-                label = (f"{quad}  in:{enter_counts[quad]}  "
-                         f"out:{exit_counts[quad]}")
-                cv2.putText(out, label, (12, y_offset + i * 22),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
-
-            if all_events and fid - all_events[-1]["frame"] < fps:
-                last = all_events[-1]
-                event_name = last["event"]
-                quadrant = last["quadrant"]
-                if event_name.startswith("enter_"):
-                    ev_txt = f"ENTER {quadrant} (#{last['enter_count']})"
-                    ev_col = (0, 255, 90)
-                elif event_name.startswith("exit_"):
-                    ev_txt = f"EXIT {quadrant} (#{last['exit_count']})"
-                    ev_col = (50, 50, 255)
-                else:
-                    ev_txt = event_name
-                    ev_col = (255, 255, 255)
-                cv2.rectangle(out, (6, proc_h - 45), (300, proc_h - 8), (0, 0, 0), -1)
-                cv2.putText(out, ev_txt, (10, proc_h - 14),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, ev_col, 2, cv2.LINE_AA)
-
-            cv2.putText(out, ts_str, (12, 135),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.60, (200, 200, 200), 1, cv2.LINE_AA)
-
-            writer.write(out)
-
-            if fid % 200 == 0:
-                pct = 100 * fid / total
-                self.progress_cb(
-                    pct,
-                    f"Frame {fid:,}/{total:,}  blobs:{len(blobs):3d}  "
-                    f"events:{len(all_events)}  shakes:{n_vibration_skips}")
-
-        cap.release()
-        writer.release()
-
-        with open(csv_path, "w", newline="") as f:
-            csv.writer(f).writerows(csv_rows)
-
-        return all_events
 
 
 def _stem_circle_path(video_path: str) -> str:
@@ -441,10 +221,10 @@ class BatchApp:
 
         sf = tk.Frame(qf)
         sf.pack(fill=tk.X, padx=4, pady=(0, 4))
-        for name, path in VIDEOS.items():
-            tk.Button(sf, text=f"+ {name}", width=12, relief=tk.GROOVE,
-                      command=lambda p=path: self._enqueue([p])).pack(
-                          side=tk.LEFT, padx=1)
+        # for name, path in VIDEOS.items():
+        #     tk.Button(sf, text=f"+ {name}", width=12, relief=tk.GROOVE,
+        #               command=lambda p=path: self._enqueue([p])).pack(
+        #                   side=tk.LEFT, padx=1)
 
         self._queue_count_lbl = tk.Label(
             qf, text="0 videos", font=("Arial", 8), fg="#444")
@@ -648,7 +428,11 @@ class BatchApp:
         self.cap = None
         self.preview_path = None
         self.current_bgr = None
-        self.canvas.delete("all")
+        # Canvas may already be destroyed when closing the app; ignore errors.
+        try:
+            self.canvas.delete("all")
+        except tk.TclError:
+            pass
 
     def _preview_video(self, path: str):
         if self._batch_running:
@@ -806,6 +590,7 @@ class BatchApp:
             filetypes=[("JSON", "*.json"), ("All", "*.*")],
         )
         if not path:
+            messagebox.showerror("Load failed", "No file selected.")
             return
         params = _load_circle_json(path)
         if not params:
@@ -941,22 +726,30 @@ class BatchApp:
                 self._set_batch_progress(
                     batch_pct, f"Video {i + 1}/{n}: {name}")
 
-                self.processor = BatchVideoProcessor(
+                self.processor = VideoProcessor(
                     video_path, circle_params,
                     progress_cb=lambda v, m, _i=i, _n=n, _name=name: self._on_vid_progress(
                         v, m, _i, _n, _name),
                     status_cb=self._status,
                 )
-                events, paths = self.processor.run()
+                events, enter_totals, exit_totals, paths = self.processor.run()
 
                 if self._batch_cancel or events is None:
                     if not self._batch_cancel:
                         summaries.append((name, "cancelled", None))
                     continue
 
+                # Write summary CSV for this video
+                with open(paths["summary"], "w", newline="") as f:
+                    w = csv.writer(f)
+                    w.writerow(["quadrant", "enters", "exits"])
+                    for q in _QUADRANTS:
+                        w.writerow([q, enter_totals[q], exit_totals[q]])
+                    w.writerow(["TOTAL", sum(enter_totals.values()), sum(exit_totals.values())])
+
                 summaries.append((
                     name, "ok",
-                    paths["enter_totals"], paths["exit_totals"],
+                    enter_totals, exit_totals,
                     len(events), paths["output_dir"],
                 ))
 
@@ -975,7 +768,8 @@ class BatchApp:
                 self._status("\n".join(lines))
         except Exception as exc:
             import traceback
-            self._status(f"Error:\n{exc}\n\n{traceback.format_exc()[:500]}")
+            self._status(f"⚠ Error: {type(exc)}\n{str(exc)}\n\n{traceback.format_exc()[:400]}")
+            raise
         finally:
             self.processor = None
             self._batch_running = False
