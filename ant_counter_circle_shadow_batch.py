@@ -47,28 +47,12 @@ except ImportError:
     )
 
 from ant_counter_circle_shadow import (
-    VIDEOS,
     DEFAULT_RADIUS,
-    QUAD_COLORS,
     VideoProcessor,
-    Tracker,
-    compute_ld1_diff,
-    cluster_blobs,
-    angle_deg_from_center_to_point,
-    draw_quadrant_arcs,
-    compute_hsv_diff,
-    build_ant_color_gate,
-    build_shadow_mask,
-    separate_shadow_blobs,
-    PROCESS_SCALE,
-    DIFF_THRESH,
-    FRAME_STRIDE,
-    MIN_BLOB_AREA,
-    MAX_BLOB_AREA,
-    MAX_TRACK_DIST,
-    MAX_COAST_FRAMES,
-    CROSS_HYSTERESIS_FRAMES,
-    VIBRATION_PCT,
+    CirclePreviewMixin,
+    _stem_circle_path,
+    _load_circle_json,
+    _circle_params_dict,
 )
 
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
@@ -77,76 +61,11 @@ _QUADRANTS = ("NE", "SE", "SW", "NW")
 
 
 
-def _stem_circle_path(video_path: str) -> str:
-    stem = os.path.splitext(os.path.basename(video_path))[0]
-    out_dir = os.path.join(os.path.dirname(video_path), "outputs")
-    return os.path.join(out_dir, f"{stem}_circle.json")
+# NOTE: circle JSON helpers and preview/circle UI helpers are
+# imported from ant_counter_circle_shadow.py to avoid duplication.
 
 
-def _normalize_circle_params(raw: dict) -> dict | None:
-    """
-    Accept circle JSON in several shapes and return a dict with
-    center, radius, and north_angle — or None if invalid.
-    """
-    if not isinstance(raw, dict):
-        return None
-
-    # Wrapped: {"circle_params": {...}} or full output file from VideoProcessor
-    params = raw.get("circle_params") if "circle_params" in raw else raw
-    if not isinstance(params, dict):
-        return None
-
-    center = params.get("center")
-    radius = params.get("radius")
-    if center is None or radius is None:
-        return None
-
-    try:
-        cx, cy = float(center[0]), float(center[1])
-        radius = float(radius)
-    except (TypeError, ValueError, IndexError):
-        return None
-
-    north_angle = params.get("north_angle")
-    if north_angle is None and "north_point" in params:
-        np_ = params["north_point"]
-        try:
-            nx, ny = float(np_[0]), float(np_[1])
-            north_angle = angle_deg_from_center_to_point(cx, cy, nx, ny)
-        except (TypeError, ValueError, IndexError):
-            return None
-    if north_angle is None:
-        return None
-
-    return {
-        "center": (cx, cy),
-        "radius": radius,
-        "north_angle": float(north_angle),
-    }
-
-
-def _load_circle_json(path: str) -> dict | None:
-    if not path or not os.path.isfile(path):
-        return None
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        return _normalize_circle_params(data)
-    except (json.JSONDecodeError, OSError, TypeError):
-        return None
-
-
-def _circle_params_dict(center, radius, north_point) -> dict:
-    north_angle = angle_deg_from_center_to_point(
-        center[0], center[1], north_point[0], north_point[1])
-    return {
-        "center": center,
-        "radius": radius,
-        "north_angle": north_angle,
-    }
-
-
-class BatchApp:
+class BatchApp(CirclePreviewMixin):
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Ant Hole Counter — Batch")
@@ -221,10 +140,6 @@ class BatchApp:
 
         sf = tk.Frame(qf)
         sf.pack(fill=tk.X, padx=4, pady=(0, 4))
-        # for name, path in VIDEOS.items():
-        #     tk.Button(sf, text=f"+ {name}", width=12, relief=tk.GROOVE,
-        #               command=lambda p=path: self._enqueue([p])).pack(
-        #                   side=tk.LEFT, padx=1)
 
         self._queue_count_lbl = tk.Label(
             qf, text="0 videos", font=("Arial", 8), fg="#444")
@@ -457,175 +372,25 @@ class BatchApp:
             f"{self.orig_w}x{self.orig_h}  {self.fps:.0f} fps  "
             f"{self.total_frames:,} frames")
 
-    def _show_frame(self, idx: int):
-        if not self.cap:
-            return
-        idx = max(0, min(idx, self.total_frames - 1))
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ret, frame = self.cap.read()
-        if not ret:
-            return
-        self.current_bgr = frame
-        self._frame_lbl.config(
-            text=f"Frame {idx:,} / {max(0, self.total_frames - 1):,}  "
-                 f"({timedelta(seconds=int(idx / self.fps))})")
-        self._render()
-
-    def _render(self):
-        if self.current_bgr is None:
-            return
-        cw = self.canvas.winfo_width()
-        ch = self.canvas.winfo_height()
-        if cw < 4 or ch < 4:
-            return
-
-        scale = min(cw / self.orig_w, ch / self.orig_h)
-        self.disp_scale = scale
-        dw = int(self.orig_w * scale)
-        dh = int(self.orig_h * scale)
-        self.disp_off_x = (cw - dw) // 2
-        self.disp_off_y = (ch - dh) // 2
-
-        small = cv2.resize(self.current_bgr, (dw, dh))
-        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-
-        if self.circle_center:
-            cx_disp, cy_disp = self._v2c([self.circle_center])[0]
-            cx_img = int(cx_disp - self.disp_off_x)
-            cy_img = int(cy_disp - self.disp_off_y)
-            radius_img = int(self.circle_radius * self.disp_scale)
-
-            if self.north_point and self.circle_complete:
-                north_angle = angle_deg_from_center_to_point(
-                    self.circle_center[0], self.circle_center[1],
-                    self.north_point[0], self.north_point[1])
-                draw_quadrant_arcs(rgb, (cx_img, cy_img), radius_img, north_angle)
-            else:
-                cv2.circle(rgb, (cx_img, cy_img), radius_img, (50, 255, 50), 2)
-                cv2.circle(rgb, (cx_img, cy_img), 5, (50, 255, 50), -1)
-                if self.north_point:
-                    nx_disp, ny_disp = self._v2c([self.north_point])[0]
-                    nx_img = int(nx_disp - self.disp_off_x)
-                    ny_img = int(ny_disp - self.disp_off_y)
-                    cv2.line(rgb, (cx_img, cy_img), (nx_img, ny_img), (255, 255, 0), 2)
-                    cv2.circle(rgb, (nx_img, ny_img), 5, (255, 255, 0), -1)
-
-        img = Image.fromarray(rgb)
-        self._photo = ImageTk.PhotoImage(img)
-        self.canvas.delete("all")
-        self.canvas.create_image(
-            self.disp_off_x, self.disp_off_y, anchor=tk.NW, image=self._photo)
-
-    def _v2c(self, pts):
-        return [(x * self.disp_scale + self.disp_off_x,
-                 y * self.disp_scale + self.disp_off_y) for x, y in pts]
-
-    def _c2v(self, cx, cy):
-        return ((cx - self.disp_off_x) / self.disp_scale,
-                (cy - self.disp_off_y) / self.disp_scale)
-
     def _click(self, event):
         if not self.cap or self._batch_running:
             return
-        vx, vy = self._c2v(event.x, event.y)
-        if self.circle_center is None:
-            self.circle_center = (vx, vy)
-            self.circle_radius = float(self._radius_var.get())
-            self._circle_lbl.config(
-                text="Center set — click for north", fg="#664400")
-        elif self.north_point is None:
-            self.north_point = (vx, vy)
-            self.circle_complete = True
-            self._circle_lbl.config(text="Circle ready — assign to a video or use as shared", fg="#006600")
-            self._refresh_proc_btn()
+        super()._click(event)
+        if self.circle_complete:
             self._refresh_assign_btns()
-        self._render()
 
     def _rclick(self, _event):
         if not self._batch_running:
-            self.clear_circle()
+            super()._rclick(_event)
 
     def clear_circle(self):
-        self.circle_center = None
-        self.north_point = None
-        self.circle_complete = False
-        self._circle_lbl.config(text="No circle defined", fg="#b00")
-        if self.current_bgr is not None:
-            self._render()
-        self._refresh_proc_btn()
+        super().clear_circle()
         self._refresh_assign_btns()
-
-    def _on_radius_change(self):
-        self.circle_radius = float(self._radius_var.get())
-        if self.current_bgr is not None:
-            self._render()
-
-    def _on_slider(self, val):
-        self._show_frame(int(float(val)))
-
-    def _resize(self, _event):
-        if self.current_bgr is not None:
-            self._render()
-
-    def _save_circle(self):
-        if not self.circle_complete:
-            messagebox.showwarning("Circle", "Define center and north first.")
-            return
-        path = filedialog.asksaveasfilename(
-            title="Save circle parameters",
-            defaultextension=".json",
-            filetypes=[("JSON", "*.json")],
-        )
-        if not path:
-            return
-        params = _circle_params_dict(
-            self.circle_center, self.circle_radius, self.north_point)
-        with open(path, "w") as f:
-            json.dump({"circle_params": params}, f, indent=2)
-        self._status(f"Saved circle to:\n{path}")
-
-    def _load_circle(self):
-        path = filedialog.askopenfilename(
-            title="Load circle parameters",
-            filetypes=[("JSON", "*.json"), ("All", "*.*")],
-        )
-        if not path:
-            messagebox.showerror("Load failed", "No file selected.")
-            return
-        params = _load_circle_json(path)
-        if not params:
-            messagebox.showerror(
-                "Load failed",
-                f"Could not read a valid circle from:\n{path}\n\n"
-                "Expected JSON with center, radius, and north_angle\n"
-                "(or north_point).  Files from outputs/*_circle.json work.")
-            return
-        self._apply_circle_params(params)
 
     def _apply_circle_params(self, params: dict):
-        normalized = _normalize_circle_params(
-            params if "circle_params" in params else {"circle_params": params})
-        if not normalized:
-            messagebox.showerror(
-                "Invalid circle",
-                "Circle JSON must include center, radius, and north_angle\n"
-                "(or north_point to derive north).")
-            return
-        params = normalized
-        self.circle_center = params["center"]
-        self.circle_radius = params["radius"]
-        self._radius_var.set(int(round(self.circle_radius)))
-        ang = params["north_angle"]
-        rad = math.radians(ang)
-        cx, cy = self.circle_center
-        r = max(self.circle_radius * 0.5, 50)
-        self.north_point = (cx + r * math.cos(rad), cy + r * math.sin(rad))
-        self.circle_complete = True
-        self._circle_lbl.config(text="Circle loaded", fg="#006600")
-        if self.current_bgr is not None:
-            self._render()
-        self._refresh_proc_btn()
-        self._refresh_assign_btns()
+        super()._apply_circle_params(params)
+        if self.circle_complete:
+            self._refresh_assign_btns()
 
     def _shared_circle_params(self) -> dict | None:
         if not self.circle_complete:
