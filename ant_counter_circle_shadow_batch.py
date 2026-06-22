@@ -94,6 +94,8 @@ class BatchApp(CirclePreviewMixin):
         self.processor: VideoProcessor | None = None
         self._batch_cancel = False
         self._batch_running = False
+        self.output_root: str | None = None
+        self.output_root_base: str | None = None
 
         self._build_ui()
 
@@ -144,6 +146,21 @@ class BatchApp(CirclePreviewMixin):
         self._queue_count_lbl = tk.Label(
             qf, text="0 videos", font=("Arial", 8), fg="#444")
         self._queue_count_lbl.pack(anchor=tk.W, padx=4, pady=(0, 4))
+
+        outf = ttk.LabelFrame(sidebar, text="  Output location  ")
+        outf.pack(fill=tk.X, pady=4)
+        self._output_root_lbl = tk.Label(
+            outf,
+            text="Output root: default in outputs",
+            font=("Arial", 8), fg="#444", justify=tk.LEFT, anchor=tk.W,
+            wraplength=250)
+        self._output_root_lbl.pack(fill=tk.X, padx=4, pady=(4, 2))
+        tk.Button(
+            outf, text="Select output folder…",
+            command=self._select_output_root).pack(fill=tk.X, padx=4, pady=(0, 2))
+        tk.Button(
+            outf, text="Clear output folder",
+            command=self._clear_output_root).pack(fill=tk.X, padx=4, pady=(0, 4))
 
         # Preview frame scrub
         ff = ttk.LabelFrame(sidebar, text="  Preview frame  ")
@@ -258,6 +275,9 @@ class BatchApp(CirclePreviewMixin):
             if saved:
                 self._per_video_circles[path] = saved
             added += 1
+        if self.output_root:
+            self.output_root_base = self._compute_output_root_base()
+            self._update_output_root_label()
         self._refresh_queue_ui()
         if added and self.preview_path is None and self.video_queue:
             self._queue_list.selection_set(0)
@@ -310,6 +330,9 @@ class BatchApp(CirclePreviewMixin):
         self.video_queue.clear()
         self._per_video_circles.clear()
         self._close_preview()
+        if self.output_root:
+            self.output_root_base = None
+            self._update_output_root_label()
         self._refresh_queue_ui()
         self._refresh_proc_btn()
 
@@ -334,6 +357,42 @@ class BatchApp(CirclePreviewMixin):
             self._circle_lbl.config(
                 text=f"Circle: assigned to {os.path.basename(path)}", fg="#006600")
         self._refresh_assign_btns()
+
+    def _select_output_root(self):
+        root = filedialog.askdirectory(title="Select output root directory")
+        if not root:
+            return
+        self.output_root = root
+        self.output_root_base = self._compute_output_root_base()
+        self._update_output_root_label()
+
+    def _clear_output_root(self):
+        self.output_root = None
+        self.output_root_base = None
+        self._update_output_root_label()
+
+    def _update_output_root_label(self):
+        if self.output_root is None:
+            self._output_root_lbl.config(
+                text="Output root: default in outputs")
+            return
+        if self.output_root_base:
+            self._output_root_lbl.config(
+                text=(f"Output root: {self.output_root}\n"
+                      f"Mirror base: {self.output_root_base}"))
+        else:
+            self._output_root_lbl.config(
+                text=f"Output root: {self.output_root}")
+
+    def _compute_output_root_base(self) -> str | None:
+        if not self.video_queue:
+            return None
+        dirs = [os.path.dirname(p) for p in self.video_queue]
+        try:
+            base = os.path.commonpath(dirs)
+        except ValueError:
+            return None
+        return base
 
     # ── Preview ──────────────────────────────────────────────────────────────
 
@@ -496,6 +555,8 @@ class BatchApp(CirclePreviewMixin):
                     progress_cb=lambda v, m, _i=i, _n=n, _name=name: self._on_vid_progress(
                         v, m, _i, _n, _name),
                     status_cb=self._status,
+                    output_root=self.output_root,
+                    output_root_base=self.output_root_base,
                 )
                 events, enter_totals, exit_totals, paths = self.processor.run()
 

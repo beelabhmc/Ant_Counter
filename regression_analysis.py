@@ -26,6 +26,8 @@ from __future__ import annotations
 import os
 import glob
 import csv
+import argparse
+import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -36,11 +38,11 @@ from scipy import stats
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Path to the ground truth CSV
-GROUND_TRUTH_CSV = os.path.join(_SCRIPT_DIR, "Natalie Thesis Data - Count Data Representative Sample.csv")
+# GROUND_TRUTH_CSV = os.path.join(_SCRIPT_DIR, "Natalie Thesis Data - Count Data Representative Sample.csv")
 
 # Folder(s) to search for output/*_summary.csv files
 # Searches recursively inside each directory listed here
-SEARCH_DIRS = [_SCRIPT_DIR]
+SEARCH_DIRS = [os.path.join(_SCRIPT_DIR, "outputs")]
 
 # Save merged predictions + ground truth to a CSV for further inspection
 SAVE_RESULTS_CSV = True
@@ -60,7 +62,7 @@ def load_predictions(search_dirs: list[str]) -> pd.DataFrame:
     rows = []
     for base in search_dirs:
         for summary_path in sorted(glob.glob(
-                os.path.join(base, "**", "big_rep_sample", "*", "outputs", "*_summary.csv"), recursive=True)):
+                os.path.join(base, "*", "*_summary.csv"), recursive=True)):
             stem = os.path.basename(summary_path).replace("_summary.csv", "")
             with open(summary_path, newline="") as f:
                 for row in csv.DictReader(f):
@@ -77,7 +79,7 @@ def load_predictions(search_dirs: list[str]) -> pd.DataFrame:
     if not rows:
         raise FileNotFoundError(
             "No output/*_summary.csv files found.\n"
-            f"Searched under: {SEARCH_DIRS}\n"
+            f"Searched under: {search_dirs}\n"
             "Run the batch processor first.")
     return pd.DataFrame(rows)
 
@@ -96,6 +98,9 @@ def load_ground_truth(csv_path: str) -> pd.DataFrame:
     Returns a long DataFrame with one row per (stem, quadrant, direction).
     Columns: stem, quadrant, direction, ground_truth.
     """
+    if not csv_path:
+        raise ValueError("Ground truth CSV path not provided. Please use the --ground-truth-csv argument to specify the path.")
+    
     if not os.path.isfile(csv_path):
         raise FileNotFoundError(f"Ground truth file not found:\n  {csv_path}")
 
@@ -110,8 +115,14 @@ def load_ground_truth(csv_path: str) -> pd.DataFrame:
     for _, row in df.iterrows():
         stem = str(row["Video Title"]).strip()
         for q in _QUADRANTS:
-            e = int(pd.to_numeric(row.get(f"{q} Enter", 0), errors="coerce") or 0)
-            x = int(pd.to_numeric(row.get(f"{q} Exit",  0), errors="coerce") or 0)
+            try:
+                e = int(pd.to_numeric(row.get(f"{q} Enter", 0), errors="coerce") or 0)
+                x = int(pd.to_numeric(row.get(f"{q} Exit",  0), errors="coerce") or 0)
+            except (ValueError, TypeError):
+                warnings.warn(
+                    f"Invalid count value for video '{stem}', quadrant '{q}'.\n"
+                    f"Expected integer counts in columns '{q} Enter' and '{q} Exit'.\n"
+                    f"Found: '{row.get(f'{q} Enter')}' and '{row.get(f'{q} Exit')}'")
             rows.append({"stem": stem, "quadrant": q,
                          "direction": "enters", "ground_truth": e})
             rows.append({"stem": stem, "quadrant": q,
@@ -248,14 +259,17 @@ def plot_regression(merged: pd.DataFrame, res: dict):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main():
+def main(search_dirs: list[str] | None = None, ground_truth_csv: str | None = None):
+    if search_dirs is None:
+        search_dirs = SEARCH_DIRS
+
     print("Loading predictions…")
-    pred_df = load_predictions(SEARCH_DIRS)
+    pred_df = load_predictions(search_dirs)
     print(f"  {pred_df['stem'].nunique()} video(s), "
           f"{len(pred_df)} prediction row(s) loaded.")
 
     print("Loading ground truth…")
-    gt_df = load_ground_truth(GROUND_TRUTH_CSV)
+    gt_df = load_ground_truth(ground_truth_csv)
     print(f"  {gt_df['stem'].nunique()} video(s), "
           f"{len(gt_df)} ground truth row(s) loaded.")
 
@@ -308,4 +322,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Fit linear regression between predicted and ground truth ant counts.")
+    parser.add_argument(
+        "--search-dirs",
+        nargs="+",
+        default=None,
+        help="Directories to search for output/*_summary.csv files (default: current script directory)")
+    parser.add_argument(
+        "--ground-truth-csv",
+        default=None,
+        help="Path to ground truth CSV")
+    args = parser.parse_args()
+    
+    main(search_dirs=[os.path.abspath(dir) for dir in args.search_dirs], ground_truth_csv=os.path.abspath(args.ground_truth_csv))

@@ -911,11 +911,15 @@ class Tracker:
 
 class VideoProcessor:
     def __init__(self, video_path, circle_params,
-                 progress_cb, status_cb):
+                 progress_cb, status_cb,
+                 output_root: str | None = None,
+                 output_root_base: str | None = None):
         self.video_path = video_path
         self.circle_params = circle_params  # dict with center, radius, north_angle
         self.progress_cb = progress_cb
         self.status_cb = status_cb
+        self.output_root = output_root # base directory to save outputs
+        self.output_root_base = output_root_base # base path to define relative video paths for output organization
         self._cancel = False
 
     def cancel(self):
@@ -945,7 +949,15 @@ class VideoProcessor:
         }
 
         # Output directory
-        out_dir = os.path.join(os.path.dirname(self.video_path), "outputs")
+        if self.output_root:
+            if self.output_root_base:
+                rel_path = os.path.relpath(
+                    os.path.dirname(self.video_path), self.output_root_base)
+                out_dir = os.path.join(self.output_root, rel_path)
+            else:
+                out_dir = self.output_root
+        else:
+            out_dir = "outputs"
         os.makedirs(out_dir, exist_ok=True)
         stem = os.path.splitext(os.path.basename(self.video_path))[0]
 
