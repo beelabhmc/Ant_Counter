@@ -10,19 +10,19 @@ Detection method: frame-to-frame difference (NOT background subtraction).
   zero motion and are ignored.  Moving ants show up clearly.
 
 Usage:
-    python ant_counter.py
+    python ant_counter_circle_shadow.py
 
 Workflow:
     1. Click a video button (or Browse…) to load a video.
-    2. Scrub the frame slider to find a good view of the hole entrance.
-    3. Left-click to place polygon points around the hole.
-       Double-click to close the polygon.  Right-click to undo the last point.
-    4. Click "Process Video".  Results land in <video_folder>/outputs/.
+    2. Select an output directory
+    3. Scrub the frame slider to find a good view of the hole entrance.
+    4. Click to define the center of the entrance and the direction of north
+    5. Click "Process Video".  Results are written to the output directory.
 
 Outputs (per video):
     <name>_counts.csv       — timestamp, event (enter/exit), running count
     <name>_counted.mp4      — annotated video with live count overlay
-    <name>_polygon.json     — bounding polygon coordinates
+    <name>_ circle.json     — bounding polygon coordinates
 """
 
 from __future__ import annotations
