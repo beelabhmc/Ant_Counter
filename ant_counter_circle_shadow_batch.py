@@ -9,9 +9,11 @@ Usage:
 
 Workflow:
     1. Add videos (files, folder, or shortcuts).
+    2. Select an output directory
     2. Preview any video in the queue; scrub to a representative frame.
-    3. Set circle center + north direction once (same camera setup assumed).
-    4. Click "Process All".  Each video writes to its own <folder>/outputs/.
+    3. Set circle center + north direction once (same camera setup assumed)
+    4. Select other videos in the queue to override shared circles if needed
+    5. Click "Process All".  Each video writes several files to the output directory.
 
 Outputs (per video):
     <name>_counts.csv       — events with separate enter_count / exit_count columns
@@ -19,10 +21,9 @@ Outputs (per video):
     <name>_counted.mp4      — annotated video (in/out shown separately per quadrant)
     <name>_circle.json      — circle parameters
 
-Optional: Save/load circle params as JSON to reuse across sessions.
-If a video already has outputs/<stem>_circle.json, it is loaded when you
-select that video in the queue (overrides the shared setup for that item only
-when "Use per-video circle if saved" is checked).
+Note: Circle params are saved/loaded as JSON to reuse across sessions.
+If a video already has <stem>_circle.json in the output directory, it is loaded when you
+select that video in the queue.
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ from ant_counter_circle_shadow import (
     CirclePreviewMixin,
     _stem_circle_path,
     _load_circle_json,
+    _save_circle_json,
     _circle_params_dict,
 )
 
@@ -151,7 +153,7 @@ class BatchApp(CirclePreviewMixin):
         outf.pack(fill=tk.X, pady=4)
         self._output_root_lbl = tk.Label(
             outf,
-            text="Output root: default in outputs",
+            text="Output root: default in ./outputs",
             font=("Arial", 8), fg="#444", justify=tk.LEFT, anchor=tk.W,
             wraplength=250)
         self._output_root_lbl.pack(fill=tk.X, padx=4, pady=(4, 2))
@@ -271,7 +273,8 @@ class BatchApp(CirclePreviewMixin):
             if path in self.video_queue:
                 continue
             self.video_queue.append(path)
-            saved = _load_circle_json(_stem_circle_path(path))
+            out_dir, stem = self._find_outdir(path)
+            saved = _load_circle_json(_stem_circle_path(out_dir, stem))
             if saved:
                 self._per_video_circles[path] = saved
             added += 1
@@ -374,7 +377,7 @@ class BatchApp(CirclePreviewMixin):
     def _update_output_root_label(self):
         if self.output_root is None:
             self._output_root_lbl.config(
-                text="Output root: default in outputs")
+                text="Output root: default in ./outputs")
             return
         if self.output_root_base:
             self._output_root_lbl.config(
@@ -393,6 +396,25 @@ class BatchApp(CirclePreviewMixin):
         except ValueError:
             return None
         return base
+    
+    def _find_outdir(self, path):
+        # Based on input video path, output directory and output root
+        # determines what is the output directory for this video
+        # and creates it if it doesn't already exist
+        # Returns the full path of the output directory and the 
+        # video name without its extension to construct output files
+        if self.output_root:
+            if self.output_root_base:
+                rel_path = os.path.relpath(
+                    os.path.dirname(path), self.output_root_base)
+                out_dir = os.path.join(self.output_root, rel_path)
+            else:
+                out_dir = self.output_root
+        else:
+            out_dir = os.path.join(os.path.abspath(os.path.curdir),"outputs")
+        os.makedirs(out_dir, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(path))[0]
+        return out_dir, stem
 
     # ── Preview ──────────────────────────────────────────────────────────────
 
@@ -463,18 +485,19 @@ class BatchApp(CirclePreviewMixin):
         return self._shared_circle_params()
 
     def _assign_circle_to_video(self):
-        if not self.circle_complete or not self.preview_path:
+        if not self.circle_complete:
+            messagebox.showwarning("Circle", "Define center and north first.")
+            return
+        if not self.preview_path:
+            messagebox.showerror("Please select a video in the video queue")
             return
         params = _circle_params_dict(
             self.circle_center, self.circle_radius, self.north_point)
         self._per_video_circles[self.preview_path] = params
-        # Also save to disk in outputs/
-        out_dir = os.path.join(os.path.dirname(self.preview_path), "outputs")
-        os.makedirs(out_dir, exist_ok=True)
-        stem = os.path.splitext(os.path.basename(self.preview_path))[0]
-        circle_path = os.path.join(out_dir, f"{stem}_circle.json")
-        with open(circle_path, "w") as f:
-            json.dump({"circle_params": params}, f, indent=2)
+        # Also save to disk in the designated output directory
+        out_dir, stem = self._find_outdir(self.preview_path)
+        circle_path = _stem_circle_path(out_dir, stem)
+        _save_circle_json(params, circle_path)
         self._circle_lbl.config(
             text=f"Circle: assigned to {os.path.basename(self.preview_path)}",
             fg="#006600")
@@ -545,6 +568,7 @@ class BatchApp(CirclePreviewMixin):
                     break
 
                 name = os.path.basename(video_path)
+                out_dir, stem = self._find_outdir(video_path)
                 circle_params = self._circle_for_video(video_path)
                 batch_pct = 100 * i / n
                 self._set_batch_progress(
@@ -552,11 +576,10 @@ class BatchApp(CirclePreviewMixin):
 
                 self.processor = VideoProcessor(
                     video_path, circle_params,
-                    progress_cb=lambda v, m, _i=i, _n=n, _name=name: self._on_vid_progress(
+                    lambda v, m, _i=i, _n=n, _name=name: self._on_vid_progress(
                         v, m, _i, _n, _name),
-                    status_cb=self._status,
-                    output_root=self.output_root,
-                    output_root_base=self.output_root_base,
+                    self._status,
+                    out_dir, stem
                 )
                 events, enter_totals, exit_totals, paths = self.processor.run()
 

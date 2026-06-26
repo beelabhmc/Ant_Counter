@@ -235,9 +235,7 @@ CENTER_DOT_RADIUS = 5
 # Circle Parameter File Helper Functions
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _stem_circle_path(video_path: str) -> str:
-    stem = os.path.splitext(os.path.basename(video_path))[0]
-    out_dir = os.path.join(os.path.dirname(video_path), "outputs")
+def _stem_circle_path(out_dir: str, stem: str) -> str:
     return os.path.join(out_dir, f"{stem}_circle.json")
 
 
@@ -288,6 +286,11 @@ def _load_circle_json(path: str) -> dict | None:
     except (json.JSONDecodeError, OSError, TypeError):
         return None
 
+def _save_circle_json(circle_params, path: str):
+    if not path or not os.path.isfile(path):
+        return None
+    with open(path, "w") as f:
+        json.dump({"circle_params": circle_params}, f, indent=2)
 
 def _circle_params_dict(center, radius, north_point) -> dict:
     north_angle = angle_deg_from_center_to_point(
@@ -542,8 +545,7 @@ class CirclePreviewMixin:
             return
         params = _circle_params_dict(
             self.circle_center, self.circle_radius, self.north_point)
-        with open(path, "w") as f:
-            json.dump({"circle_params": params}, f, indent=2)
+        _save_circle_json(params, path)
         self._status(f"Saved circle to:\n{path}")
 
     def _load_circle(self):
@@ -560,7 +562,7 @@ class CirclePreviewMixin:
                 "Load failed",
                 f"Could not read a valid circle from:\n{path}\n\n"
                 "Expected JSON with center, radius, and north_angle\n"
-                "(or north_point).  Files from outputs/*_circle.json work.")
+                "(or north_point).")
             return
         self._apply_circle_params(params)
 
@@ -910,16 +912,24 @@ class Tracker:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VideoProcessor:
-    def __init__(self, video_path, circle_params,
+    def __init__(self, video_path, 
+                 circle_params,
                  progress_cb, status_cb,
-                 output_root: str | None = None,
-                 output_root_base: str | None = None):
-        self.video_path = video_path
+                 out_dir: str | None = None,
+                 stem: str | None = None):
+        self.video_path = video_path # full path to video for processing
+        if not out_dir:
+            self.out_dir = os.path.join(os.path.abspath(os.path.curdir),"outputs")
+        else:
+            self.out_dir = out_dir
+        os.makedirs(self.out_dir, exist_ok=True)
+        if not stem:
+            self.stem = os.path.splitext(os.path.basename(self.video_path))[0] # name of video without extension
+        else:
+            self.stem = stem
         self.circle_params = circle_params  # dict with center, radius, north_angle
         self.progress_cb = progress_cb
         self.status_cb = status_cb
-        self.output_root = output_root # base directory to save outputs
-        self.output_root_base = output_root_base # base path to define relative video paths for output organization
         self._cancel = False
 
     def cancel(self):
@@ -948,21 +958,8 @@ class VideoProcessor:
             'north_angle': self.circle_params['north_angle']
         }
 
-        # Output directory
-        if self.output_root:
-            if self.output_root_base:
-                rel_path = os.path.relpath(
-                    os.path.dirname(self.video_path), self.output_root_base)
-                out_dir = os.path.join(self.output_root, rel_path)
-            else:
-                out_dir = self.output_root
-        else:
-            out_dir = "outputs"
-        os.makedirs(out_dir, exist_ok=True)
-        stem = os.path.splitext(os.path.basename(self.video_path))[0]
-
         # Save circle parameters
-        circle_path = os.path.join(out_dir, f"{stem}_circle.json")
+        circle_path = _stem_circle_path(self.out_dir, self.stem)
         with open(circle_path, "w") as f:
             json.dump({
                 "video": self.video_path,
@@ -975,9 +972,9 @@ class VideoProcessor:
             }, f, indent=2)
 
         # Single-pass: frame-to-frame diff (no background estimation needed)
-        csv_path = os.path.join(out_dir, f"{stem}_counts.csv")
-        vid_path = os.path.join(out_dir, f"{stem}_counted.mp4")
-        summary_path = os.path.join(out_dir, f"{stem}_summary.csv")
+        csv_path = os.path.join(self.out_dir, f"{self.stem}_counts.csv")
+        vid_path = os.path.join(self.out_dir, f"{self.stem}_counted.mp4")
+        summary_path = os.path.join(self.out_dir, f"{self.stem}_summary.csv")
         self.progress_cb(0, "Processing frames…")
         events = self._process_frames(
             circle_proc, proc_w, proc_h, fps, total, 
@@ -1001,7 +998,7 @@ class VideoProcessor:
             "video": vid_path,
             "circle": circle_path, 
             "summary": summary_path,
-            "output_dir": out_dir,
+            "output_dir": self.out_dir,
         }
 
     # ------------------------------------------------------------------
@@ -1254,6 +1251,8 @@ class App(CirclePreviewMixin):
 
         self.processor: VideoProcessor | None = None
         self._slider_dragging = False
+        self.out_dir: str | None = None
+
 
         self._build_ui()
 
@@ -1283,6 +1282,22 @@ class App(CirclePreviewMixin):
         self._info_lbl = tk.Label(sidebar, text="", font=("Courier", 8),
                                   justify=tk.LEFT, bg="#f4f4f4", fg="#444")
         self._info_lbl.pack(anchor=tk.W, pady=2)
+
+        # Output
+        outf = ttk.LabelFrame(sidebar, text="  Output location  ")
+        outf.pack(fill=tk.X, pady=4)
+        self._out_dir_lbl = tk.Label(
+            outf,
+            text="Output folder: default in ./outputs",
+            font=("Arial", 8), fg="#444", justify=tk.LEFT, anchor=tk.W,
+            wraplength=250)
+        self._out_dir_lbl.pack(fill=tk.X, padx=4, pady=(4, 2))
+        tk.Button(
+            outf, text="Select output folder…",
+            command=self._select_out_dir).pack(fill=tk.X, padx=4, pady=(0, 2))
+        tk.Button(
+            outf, text="Clear output folder",
+            command=self._clear_out_dir).pack(fill=tk.X, padx=4, pady=(0, 4))
 
         # Frame scrub
         ff = ttk.LabelFrame(sidebar, text="  Frame  ")
@@ -1362,6 +1377,26 @@ class App(CirclePreviewMixin):
         self.canvas.bind("<Button-3>",        self._rclick)
         self.canvas.bind("<Configure>",       self._resize)
 
+    def _select_out_dir(self):
+        out_dir = filedialog.askdirectory(title="Select output folder")
+        if not out_dir:
+            return
+        self.out_dir = out_dir
+        self._update_out_dir_label()
+
+    def _clear_out_dir(self):
+        self.out_dir = None
+        self._update_out_dir_label()
+
+    def _update_out_dir_label(self):
+        if self.out_dir is None:
+            self._out_dir_lbl.config(
+                text="Output folder: default in ./outputs")
+            return
+        else:
+            self._out_dir_lbl.config(
+                text=f"Output folder: {self.out_dir}")
+    
     # ══════════════════════════════════════════════════════════════════════════
     # Video loading
     # ══════════════════════════════════════════════════════════════════════════
@@ -1438,8 +1473,8 @@ class App(CirclePreviewMixin):
 
         self.processor = VideoProcessor(
             self.video_path, circle_params,
-            progress_cb=self._on_progress,
-            status_cb=self._status,
+            self._on_progress, self._status,
+            self.out_dir, None
         )
         threading.Thread(target=self._thread_body, daemon=True).start()
 
