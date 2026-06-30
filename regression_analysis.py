@@ -62,7 +62,7 @@ def load_predictions(search_dirs: list[str]) -> pd.DataFrame:
     rows = []
     for base in search_dirs:
         for summary_path in sorted(glob.glob(
-                os.path.join(base, "*", "*_summary.csv"), recursive=True)):
+                os.path.join(base, "**", "*_summary.csv"), recursive=True)):
             stem = os.path.basename(summary_path).replace("_summary.csv", "")
             with open(summary_path, newline="") as f:
                 for row in csv.DictReader(f):
