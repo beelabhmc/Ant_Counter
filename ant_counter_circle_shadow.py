@@ -928,13 +928,14 @@ class VideoProcessor:
         else:
             self.stem = stem
         self.circle_params = circle_params  # dict with center, radius, north_angle
+        self.first_frame = None
         self.progress_cb = progress_cb
         self.status_cb = status_cb
         self._cancel = False
 
     def cancel(self):
         self._cancel = True
-
+    
     # ------------------------------------------------------------------
     def run(self):
         """Main pipeline.  
@@ -945,6 +946,9 @@ class VideoProcessor:
         total    = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         orig_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         orig_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        ret, self.first_frame = cap.read()
+        if not ret:
+            self.first_frame = None
         cap.release()
 
         proc_w = int(orig_w * PROCESS_SCALE)
@@ -1217,6 +1221,39 @@ class VideoProcessor:
             csv.writer(f).writerows(csv_rows)
 
         return all_events
+
+    def calculate_quadrant_arc_pixel_values(self):
+        """
+        Calculate the average pixel values for each quadrant arc of the circle.
+        Returns a dict: { "NE": mean_grayscale, ... }
+        """
+        if not self.circle_params or self.first_frame is None:
+            return {}
+
+        cx, cy = self.circle_params["center"]
+        radius = self.circle_params["radius"]
+        north_angle = self.circle_params["north_angle"]
+
+        # Create a template for the masks with the same size as the first frame
+        mask = np.zeros(self.first_frame.shape[:2], dtype=np.uint8)
+
+        # Create masks for each quadrant arc
+        quadrant_masks = {}
+        start_angle = 0
+        for quad in _QUADRANTS:
+            quad_mask = mask.copy()
+            cv2.ellipse(quad_mask, (int(cx), int(cy)), (int(radius), int(radius)), north_angle, start_angle, start_angle + 90, 255, 6)
+            quadrant_masks[quad] = quad_mask
+            start_angle += 90
+
+        # Calculate mean pixel values for each quadrant arc
+        quadrant_values = {}
+        for quad, q_mask in quadrant_masks.items():
+            gray_frame = cv2.cvtColor(self.first_frame, cv2.COLOR_BGR2GRAY)
+            mean_val = cv2.mean(gray_frame, mask=q_mask)[0]  # mean returns a tuple, take the greyscale element
+            quadrant_values[quad] = mean_val
+
+        return quadrant_values
 
 
 # ─────────────────────────────────────────────────────────────────────────────

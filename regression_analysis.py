@@ -71,14 +71,16 @@ def load_predictions(search_dirs: list[str]) -> pd.DataFrame:
                         continue
                     rows.append({"stem": stem, "quadrant": q,
                                  "direction": "enters",
-                                 "predicted": int(row["enters"])})
+                                 "predicted": int(row["enters"]),
+                                 "mean_grayscale": float(row.get("mean_grayscale", 0))})
                     rows.append({"stem": stem, "quadrant": q,
                                  "direction": "exits",
-                                 "predicted": int(row["exits"])})
+                                 "predicted": int(row["exits"]),
+                                 "mean_grayscale": float(row.get("mean_grayscale", 0))})
 
     if not rows:
         raise FileNotFoundError(
-            "No output/*_summary.csv files found.\n"
+            "No *_summary.csv files found.\n"
             f"Searched under: {search_dirs}\n"
             "Run the batch processor first.")
     return pd.DataFrame(rows)

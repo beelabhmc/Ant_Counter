@@ -273,18 +273,23 @@ class BatchApp(CirclePreviewMixin):
             if path in self.video_queue:
                 continue
             self.video_queue.append(path)
-            out_dir, stem = self._find_outdir(path)
-            saved = _load_circle_json(_stem_circle_path(out_dir, stem))
-            if saved:
-                self._per_video_circles[path] = saved
+
             added += 1
         if self.output_root:
             self.output_root_base = self._compute_output_root_base()
             self._update_output_root_label()
-        self._refresh_queue_ui()
         if added and self.preview_path is None and self.video_queue:
             self._queue_list.selection_set(0)
             self._preview_video(self.video_queue[0])
+        self._load_saved_circles()
+
+    def _load_saved_circles(self):
+        for path in self.video_queue:
+            out_dir, stem = self._find_outdir(path)
+            saved = _load_circle_json(_stem_circle_path(out_dir, stem))
+            if saved:
+                self._per_video_circles[path] = saved
+        self._refresh_queue_ui()
         self._refresh_proc_btn()
 
     def _add_files(self):
@@ -367,6 +372,8 @@ class BatchApp(CirclePreviewMixin):
             return
         self.output_root = root
         self.output_root_base = self._compute_output_root_base()
+        self._load_saved_circles()
+        self._refresh_queue_ui()
         self._update_output_root_label()
 
     def _clear_output_root(self):
@@ -588,13 +595,15 @@ class BatchApp(CirclePreviewMixin):
                         summaries.append((name, "cancelled", None))
                     continue
 
+                quadrant_values = self.processor.calculate_quadrant_arc_pixel_values()
+
                 # Write summary CSV for this video
                 with open(paths["summary"], "w", newline="") as f:
                     w = csv.writer(f)
-                    w.writerow(["quadrant", "enters", "exits"])
+                    w.writerow(["quadrant", "enters", "exits", "mean_grayscale"])
                     for q in _QUADRANTS:
-                        w.writerow([q, enter_totals[q], exit_totals[q]])
-                    w.writerow(["TOTAL", sum(enter_totals.values()), sum(exit_totals.values())])
+                        w.writerow([q, enter_totals[q], exit_totals[q], quadrant_values[q]])
+                    w.writerow(["TOTAL", sum(enter_totals.values()), sum(exit_totals.values()), None])
 
                 summaries.append((
                     name, "ok",
