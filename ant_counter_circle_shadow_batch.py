@@ -270,6 +270,9 @@ class BatchApp(CirclePreviewMixin):
             ext = os.path.splitext(path)[1].lower()
             if ext not in _VIDEO_EXTS:
                 continue
+            out_dir, stem = self._find_outdir(path)
+            if stem.startswith("."):
+                continue
             if path in self.video_queue:
                 continue
             self.video_queue.append(path)
