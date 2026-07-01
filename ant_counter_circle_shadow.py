@@ -13,7 +13,7 @@ Usage:
     python ant_counter_circle_shadow.py
 
 Workflow:
-    1. Click a video button (or Browse…) to load a video.
+    1. Click Browse… to load a video.
     2. Select an output directory
     3. Scrub the frame slider to find a good view of the hole entrance.
     4. Click to define the center of the entrance and the direction of north
@@ -22,7 +22,7 @@ Workflow:
 Outputs (per video):
     <name>_counts.csv       — timestamp, event (enter/exit), running count
     <name>_counted.mp4      — annotated video with live count overlay
-    <name>_ circle.json     — bounding polygon coordinates
+    <name>_circle.json     — circle parameters (center, radius, north_angle)
 """
 
 from __future__ import annotations

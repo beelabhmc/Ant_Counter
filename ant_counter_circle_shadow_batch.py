@@ -11,15 +11,15 @@ Workflow:
     1. Add videos (files, folder, or shortcuts).
     2. Select an output directory
     2. Preview any video in the queue; scrub to a representative frame.
-    3. Set circle center + north direction once (same camera setup assumed)
-    4. Select other videos in the queue to override shared circles if needed
-    5. Click "Process All".  Each video writes several files to the output directory.
+    3. Set circle center + north direction once (same camera setup assumed). Click Assign to this video.
+    4. Select other videos in the queue to check shared circle. If ok, click Assign to this video. Otherwise, repeat step 3 to override shared circles if needed.
+    5. Once all videos have circles assigned, click "Process All".  Each video writes several files to the output directory.
 
 Outputs (per video):
     <name>_counts.csv       — events with separate enter_count / exit_count columns
     <name>_summary.csv      — total enters and exits per quadrant
     <name>_counted.mp4      — annotated video (in/out shown separately per quadrant)
-    <name>_circle.json      — circle parameters
+    <name>_circle.json      — circle parameters (center, radius, north_angle)
 
 Note: Circle params are saved/loaded as JSON to reuse across sessions.
 If a video already has <stem>_circle.json in the output directory, it is loaded when you
