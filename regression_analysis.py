@@ -107,7 +107,7 @@ def load_ground_truth(csv_path: str) -> pd.DataFrame:
         raise FileNotFoundError(f"Ground truth file not found:\n  {csv_path}")
 
     df = pd.read_csv(csv_path)
-    df.columns = [c.strip() for c in df.columns]
+    df.columns = [c.replace("_"," ").strip() for c in df.columns]
 
     if "Video Title" not in df.columns:
         raise ValueError(
