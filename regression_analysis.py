@@ -118,17 +118,19 @@ def load_ground_truth(csv_path: str) -> pd.DataFrame:
         stem = str(row["Video Title"]).strip()
         for q in _QUADRANTS:
             try:
-                e = int(pd.to_numeric(row.get(f"{q} Enter", 0), errors="coerce") or 0)
-                x = int(pd.to_numeric(row.get(f"{q} Exit",  0), errors="coerce") or 0)
+                e = int(pd.to_numeric(row.get(f"{q} Enter", 0), errors="coerce"))
+                x = int(pd.to_numeric(row.get(f"{q} Exit",  0), errors="coerce"))
+                if pd.notna(e) and pd.notna(x):
+                    rows.append({"stem": stem, "quadrant": q,
+                         "direction": "enters", "ground_truth": e})
+                    rows.append({"stem": stem, "quadrant": q,
+                         "direction": "exits",  "ground_truth": x})
             except (ValueError, TypeError):
                 warnings.warn(
                     f"Invalid count value for video '{stem}', quadrant '{q}'.\n"
                     f"Expected integer counts in columns '{q} Enter' and '{q} Exit'.\n"
                     f"Found: '{row.get(f'{q} Enter')}' and '{row.get(f'{q} Exit')}'")
-            rows.append({"stem": stem, "quadrant": q,
-                         "direction": "enters", "ground_truth": e})
-            rows.append({"stem": stem, "quadrant": q,
-                         "direction": "exits",  "ground_truth": x})
+
 
     return pd.DataFrame(rows)
 
