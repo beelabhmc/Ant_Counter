@@ -44,3 +44,11 @@ python ant_counter_circle_shadow_batch.py
 | `<stem>_summary.csv` | Total enters and exits per quadrant plus an overall total |
 | `<stem>_counted.mp4` | Annotated video with circle overlay, blob markers, and live counts |
 | `<stem>_circle.json` | Saved circle parameters (center, radius, north angle) — auto-loaded in future sessions |
+
+
+## Generating Ground Truths
+
+` generate-gt/ `
+
+Given input videos, allows user to manually verify ant tracking and positon. Output format in standard MOT which tracks: frame id, track id, x, y, w, h, "not ignored", class id, visibility.
+For more information on MOT, check: https://docs.cvat.ai/docs/dataset_management/formats/format-mot/ 
