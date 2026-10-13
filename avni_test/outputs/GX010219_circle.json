@@ -1,0 +1,17 @@
+{
+  "video": "/Users/mytc/software development/ant_counter_bee_lab/Ant_Counter/avni_test/GX010219.MP4",
+  "circle_params": {
+    "center": [
+      1872.54752851711,
+      996.5019011406844
+    ],
+    "radius": 410,
+    "north_angle": 266.67687955486457
+  },
+  "orig_width": 3840,
+  "orig_height": 2160,
+  "process_scale": 0.25,
+  "detection": "frame_diff_quadrants",
+  "frame_stride": 2,
+  "diff_thresh": 15
+}
