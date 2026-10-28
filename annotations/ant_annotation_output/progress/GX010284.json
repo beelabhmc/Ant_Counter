@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "clip": "/Users/mytc/software development/ant_counter_bee_lab/Ant_Counter/annotations/ant_annotation_output/videos_30s/GX010284_30s.mp4",
+  "stem": "GX010284",
+  "source": "/Users/mytc/software development/ant_counter_bee_lab/Ant_Counter/avni_test/GX010284.MP4",
+  "source_start_frame": 0,
+  "fps": 59.94,
+  "sample_frames": [
+    0,
+    120,
+    240,
+    360,
+    480,
+    599,
+    719,
+    839,
+    959,
+    1079,
+    1199,
+    1319,
+    1439,
+    1558,
+    1678
+  ],
+  "sample_index": 1,
+  "next_id": 9,
+  "active_id": "8",
+  "annotations": {
+    "0": {
+      "1": [
+        1999,
+        765
+      ],
+      "2": [
+        1807,
+        1129
+      ],
+      "3": [
+        1753,
+        1108
+      ],
+      "4": [
+        1711,
+        1401
+      ],
+      "5": [
+        2525,
+        1227
+      ],
+      "6": [
+        2622,
+        1275
+      ],
+      "7": [
+        2646,
+        1409
+      ]
+    }
+  }
+}
