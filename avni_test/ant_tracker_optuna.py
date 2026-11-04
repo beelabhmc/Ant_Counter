@@ -108,7 +108,14 @@ def cluster_blobs(blobs, max_dist=15):
             cx = np.mean([x["cx"] for x in cluster])
             cy = np.mean([x["cy"] for x in cluster])
             area = sum(x["area"] for x in cluster)
-            clusters.append({"cx": cx, "cy": cy, "area": area})
+            merged = {"cx": cx, "cy": cy, "area": area}
+            if all("x" in x and "y" in x and "w" in x and "h" in x for x in cluster):
+                x1 = min(x["x"] for x in cluster)
+                y1 = min(x["y"] for x in cluster)
+                x2 = max(x["x"] + x["w"] for x in cluster)
+                y2 = max(x["y"] + x["h"] for x in cluster)
+                merged.update(x=x1, y=y1, w=x2 - x1, h=y2 - y1)
+            clusters.append(merged)
     return clusters
 
 # Experimental shadow detector (NOT invoked in the active frame-processing loop).
@@ -989,6 +996,10 @@ class Tracker:
             "match_streak": 1,
             "meas_cx": blob["cx"],
             "meas_cy": blob["cy"],
+            # Most recent detected box dimensions, used to place a box around
+            # the Kalman-predicted center on every frame.
+            "box_w": blob.get("w", max(1.0, 2.0 * math.sqrt(blob["area"] / math.pi))),
+            "box_h": blob.get("h", max(1.0, 2.0 * math.sqrt(blob["area"] / math.pi))),
             # Diagnostic state only; values below never feed the counting logic.
             "prior_cx": blob["cx"],
             "prior_cy": blob["cy"],
@@ -1111,6 +1122,8 @@ class Tracker:
                 ant["last_cy"] = ant["cy"]
                 ant["meas_cx"] = blob["cx"]
                 ant["meas_cy"] = blob["cy"]
+                ant["box_w"] = blob.get("w", ant.get("box_w", 1.0))
+                ant["box_h"] = blob.get("h", ant.get("box_h", 1.0))
                 # Keep a short history of REAL detections, not KF forecasts.
                 # Limit size so long videos do not accumulate unbounded memory.
                 ant.setdefault("trail", []).append((float(blob["cx"]), float(blob["cy"])))
@@ -1313,12 +1326,13 @@ class VideoProcessor:
 
         # Single-pass: frame-to-frame diff (no background estimation needed)
         csv_path = os.path.join(self.out_dir, f"{self.stem}_counts.csv")
+        bbox_csv_path = os.path.join(self.out_dir, f"{self.stem}_ant_boxes.csv")
         vid_path = os.path.join(self.out_dir, f"{self.stem}_counted.mp4")
         summary_path = os.path.join(self.out_dir, f"{self.stem}_summary.csv")
         self.progress_cb(0, "Processing frames…")
         events = self._process_frames(
             circle_proc, proc_w, proc_h, fps, total, 
-            csv_path, vid_path, summary_path)
+            csv_path, bbox_csv_path, vid_path, summary_path)
         
         # Calculate summary counts per quadrant
         enter_totals = {q: 0 for q in _QUADRANTS}
@@ -1335,6 +1349,7 @@ class VideoProcessor:
 
         return events, enter_totals, exit_totals, {
             "csv": csv_path, 
+            "ant_boxes_csv": bbox_csv_path,
             "video": vid_path,
             "circle": circle_path, 
             "summary": summary_path,
@@ -1347,7 +1362,7 @@ class VideoProcessor:
     # blob clustering -> multi-ant tracking -> event CSV and rendered MP4.
     # Coordinates here are reduced to PROCESS_SCALE of original video.
     def _process_frames(self, circle_proc, proc_w, proc_h,
-                        fps, total, csv_path, vid_path, summary_path):
+                        fps, total, csv_path, bbox_csv_path, vid_path, summary_path):
         tracker = Tracker(
             max_dist=MAX_TRACK_DIST,
             max_missing_frames=MAX_COAST_FRAMES,
@@ -1383,6 +1398,8 @@ class VideoProcessor:
         cap = cv2.VideoCapture(self.video_path)
         csv_rows = [["timestamp_s", "time", "frame", "event", "quadrant",
                      "enter_count", "exit_count", "ant_id", "x_orig", "y_orig"]]
+        bbox_rows = [["frame", "timestamp_s", "ant_id", "x_min", "y_min",
+                      "x_max", "y_max", "status"]]
 
         for fid in range(total):
             if self._cancel:
@@ -1448,7 +1465,11 @@ class VideoProcessor:
                     if MIN_BLOB_AREA <= area <= MAX_BLOB_AREA:
                         blobs.append({"cx": centroids[i][0],
                                       "cy": centroids[i][1],
-                                      "area": int(area)})
+                                      "area": int(area),
+                                      "x": int(stats[i, cv2.CC_STAT_LEFT]),
+                                      "y": int(stats[i, cv2.CC_STAT_TOP]),
+                                      "w": int(stats[i, cv2.CC_STAT_WIDTH]),
+                                      "h": int(stats[i, cv2.CC_STAT_HEIGHT])})
                 # ant_blobs, shadow_blobs = separate_shadow_blobs(blobs, shadow_mask)
                 # EXPLANATION: Merge close components to reduce split detections; might accidentally merge distinct nearby ants.
                 blobs = cluster_blobs(blobs, max_dist=CLUSTER_DISTANCE)
@@ -1458,6 +1479,22 @@ class VideoProcessor:
             events = tracker.update(blobs, circle_proc)
             ts  = fid / fps
             ts_str = str(timedelta(seconds=int(ts)))
+
+            # One row per retained ant and frame. Matched rows use the current
+            # detection center; missing rows use the Kalman predicted center.
+            for ant_id, ant in tracker.ants().items():
+                box_w = float(ant.get("box_w", 1.0))
+                box_h = float(ant.get("box_h", 1.0))
+                x_min = (ant["cx"] - box_w / 2) / PROCESS_SCALE
+                y_min = (ant["cy"] - box_h / 2) / PROCESS_SCALE
+                x_max = (ant["cx"] + box_w / 2) / PROCESS_SCALE
+                y_max = (ant["cy"] + box_h / 2) / PROCESS_SCALE
+                bbox_rows.append([
+                    fid, f"{ts:.3f}", ant_id,
+                    f"{x_min:.1f}", f"{y_min:.1f}",
+                    f"{x_max:.1f}", f"{y_max:.1f}",
+                    "detected" if ant["matched_this_frame"] else "predicted",
+                ])
 
             for ev in events:
                 quadrant = ev["quadrant"]
@@ -1601,6 +1638,9 @@ class VideoProcessor:
 
         with open(csv_path, "w", newline="") as f:
             csv.writer(f).writerows(csv_rows)
+
+        with open(bbox_csv_path, "w", newline="") as f:
+            csv.writer(f).writerows(bbox_rows)
 
         return all_events
 
