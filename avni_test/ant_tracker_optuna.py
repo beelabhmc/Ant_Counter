@@ -1,7 +1,7 @@
 # ============================================================================
 # ANT HOLE COUNTER — EDUCATIONAL, FULLY COMMENTED EDITION
 # ============================================================================
-# This file preserves the original executable statements and their behavior.
+# This file keeps the ant tracking pipeline and adds an Optuna evaluation mode.
 # Extra comments explain the pipeline, math, array shapes, and key limitations.
 #
 # End-to-end data flow:
@@ -10,7 +10,7 @@
 #   -> Kalman predictions -> Hungarian assignment -> persistent ant IDs
 #   -> radius/buffer/hysteresis crossing decisions -> CSV and annotated MP4.
 #
-# IMPORTANT DESIGN OBSERVATIONS (no fixes applied in this annotated version):
+# IMPORTANT DESIGN OBSERVATIONS (optimization logic is implemented below):
 # * This program uses FRAME DIFFERENCING, not adaptive background subtraction.
 # * The dark-pixel "shadow_mask" currently modifies diff AFTER creating mask,
 #   so it does not filter the actual connected-components detection input.
@@ -20,8 +20,9 @@
 # * Frames skipped for camera vibration still advance tracker missing counters.
 # * Comments in the original program sometimes describe older experimental code.
 
-# python ant_tracker_with_live_tuning.py --tune-mode=True --video ants.mp4 --circle-file ants_circle.json
-# python ant_tracker_with_live_tuning.py --settings ant_tuning_parameters.json
+# python ant_tracker_optuna.py --tune-mode=True --video ants.mp4 --circle-file ants_circle.json
+# python ant_tracker_optuna.py --settings ant_tuning_parameters.json
+# python ant_tracker_optuna.py --optimize folder/
 # ============================================================================
 
 #!/usr/bin/env python3
@@ -36,7 +37,8 @@ Detection method: frame-to-frame difference (NOT background subtraction).
   zero motion and are ignored.  Moving ants show up clearly.
 
 Usage:
-    python ant_counter_circle_shadow.py
+    python ant_tracker_optuna.py
+    python ant_tracker_optuna.py --optimize folder/
 
 Workflow:
     1. Click Browse… to load a video.
@@ -53,6 +55,10 @@ Outputs (per video):
 
 from __future__ import annotations
 import argparse
+from dataclasses import dataclass, asdict
+from contextlib import contextmanager
+from collections import deque, defaultdict
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import cv2
@@ -61,7 +67,9 @@ import os
 import json
 import csv
 import threading
+import time
 import math
+import re
 from datetime import timedelta
 import optuna
 from scipy.optimize import linear_sum_assignment as _hungarian_solve
@@ -2073,15 +2081,20 @@ def tune_values():
 
 
 def apply_tune_values(settings, tracker=None):
-    """Apply controls to the globals read by the existing detection/tracking code.
+    """Apply recognized tuning keys (including optimizer-only values).
 
-    Existing Kalman filters hold Q/R matrices created in their constructors, so
-    merely modifying the global KF_* constants is insufficient. Update each
-    live filter's covariance matrices as well (without resetting its state).
+    Parameter presets are plain flat JSON objects. Live sliders remain the
+    authority over their own parameters when adjusted interactively.
     """
+    recognized = set(TUNE_SPECS) | {'PROCESS_SCALE', 'BUFFER_ZONE',
+                'CROSS_HYSTERESIS_FRAMES', 'PATH_CONFIRM_FRAMES'}
     for name, value in settings.items():
-        if name not in TUNE_SPECS:
+        if name not in recognized or isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
+        if not math.isfinite(value):
+            continue
+        if name in ('MORPH_OPEN_SIZE', 'MORPH_CLOSE_SIZE'):
+            value = _odd_kernel(value)
         globals()[name] = value
     if tracker is not None:
         tracker.max_dist = float(MAX_TRACK_DIST)
@@ -2100,14 +2113,23 @@ def save_tune_values(settings, filename):
 
 
 def load_tune_values(filename):
-    """Only accept known tuning keys from JSON; no arbitrary code execution."""
+    """Load numerical tuning preset from JSON including optimization-only keys."""
     with open(filename, encoding='utf-8') as fp:
         saved = json.load(fp)
+    if not isinstance(saved, dict):
+        raise ValueError('Settings JSON must be an object of parameter names and numeric values')
+    extras = {'PROCESS_SCALE': (0.1, 1.0), 'BUFFER_ZONE': (0, 100),
+              'CROSS_HYSTERESIS_FRAMES': (1, 30), 'PATH_CONFIRM_FRAMES': (1, 30)}
     result = {}
     for key, value in saved.items():
-        if key in TUNE_SPECS and isinstance(value, (int, float)):
-            label, low, high, factor = TUNE_SPECS[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            continue
+        if key in TUNE_SPECS:
+            _, low, high, factor = TUNE_SPECS[key]
             result[key] = max(low / factor, min(high / factor, value))
+        elif key in extras:
+            low, high = extras[key]
+            result[key] = max(low, min(high, value))
     for key in ('MORPH_OPEN_SIZE', 'MORPH_CLOSE_SIZE'):
         if key in result:
             result[key] = _odd_kernel(result[key])
@@ -2126,6 +2148,10 @@ def run_tune_mode(video_path, circle_file=None, preset_file=None):
     Frame differencing, not MOG2, is used here because that is the current
     detector in the user's source. Parameter changes apply on subsequent frames.
     """
+    # Load external presets BEFORE calculating preview dimensions: PROCESS_SCALE
+    # is not a slider, and it changes both frame size and circle coordinates.
+    if preset_file:
+        apply_tune_values(load_tune_values(preset_file))
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f'Could not open video: {video_path}')
@@ -2166,9 +2192,6 @@ def run_tune_mode(video_path, circle_file=None, preset_file=None):
     cv2.resizeWindow(TUNE_CONTROLS, 560, 760)
     cv2.namedWindow(TUNE_WINDOW, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(TUNE_WINDOW, min(2 * pw, 1600), min(ph + 80, 900))
-
-    if preset_file:
-        apply_tune_values(load_tune_values(preset_file))
 
     def no_op(_):
         pass
@@ -2284,7 +2307,10 @@ def run_tune_mode(video_path, circle_file=None, preset_file=None):
                 tracker, frame_history, displayed, frame_no, count = restart()
                 paused = False
             if key == ord('s'):
-                save_tune_values(settings, os.path.join(
+                # Keep optimized keys that have no trackbar when saving from UI.
+                complete_settings = {key: globals()[key] for key in OPTIMIZER_SETTINGS_KEYS}
+                complete_settings.update(settings)
+                save_tune_values(complete_settings, os.path.join(
                     os.path.dirname(os.path.abspath(video_path)), 'ant_tuning_parameters.json'))
     finally:
         cap.release()
@@ -2292,8 +2318,675 @@ def run_tune_mode(video_path, circle_file=None, preset_file=None):
 
 
 
+# Optimization terminal progress utilities. Flush ensures live output even when
+# standard output is redirected to a log file or displayed in an IDE terminal.
+def _opt_progress(message: str) -> None:
+    print(f"[OPTUNA {time.strftime('%H:%M:%S')}] {message}", flush=True)
+
+
+def _opt_elapsed(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:d}h {minutes:02d}m {secs:02d}s" if hours else f"{minutes:d}m {secs:02d}s"
+
+
+# ==========================================================================
+# OPTUNA OPTIMIZATION: annotated ant positions, not entrance-crossing counts
+# ==========================================================================
+# Usage: python ant_tracker_optuna.py --optimize /path/to/folder --trials 30
+#        python ant_tracker_optuna.py --settings /path/to/folder/ant_tuning_parameters.json
+# Input folder/{ground-truth, videos}; CSV header:
+# timestamp,frame,ant_id,ant_x,ant_y. Frames are ZERO-BASED and coordinates
+# correspond to the source video's original (unscaled) pixel resolution.
+# A separate ground-truth row is required for EACH visible ant at each labeled
+# frame. Omitted ants count as unannotated (predictions will be false positives).
+# Videos must share filenames (stem) with their ground-truth CSV files.
+#
+# Crossing-only parameters are retained in output presets but are not tuned:
+# position-only annotations do not establish true entry/exit events.
+# Scoring: one-to-one spatial Hungarian matching within --match-distance
+# original-image pixels; maximize 90% detection F1 + 10% ID consistency.
+# Tracks in a brief Kalman-only gap are included as predictions; this lets
+# the optimization reward successful temporal gap handling. The regular
+# tracker receives ALL intervening frames between 2-second annotations.
+# A holdout dataset is NOT implied by these reported training-set scores.
+# ==========================================================================
+
+OPTIMIZE_VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.m4v'}
+GROUND_TRUTH_COLUMNS = {'timestamp', 'frame', 'ant_id', 'ant_x', 'ant_y'}
+
+
+@dataclass(frozen=True)
+class OptimizationVideoPair:
+    """One video and corresponding annotation CSV."""
+    stem: str
+    video_path: Path
+    ground_truth_path: Path
+    annotation_count: int
+
+
+@dataclass(frozen=True)
+class OptimizationDataset:
+    """Validated directory of video/CSV pairs."""
+    root: Path
+    pairs: tuple[OptimizationVideoPair, ...]
+
+
+def load_optimization_dataset(folder: str | Path) -> OptimizationDataset:
+    """Pair basename-matched video/CSV files and validate required headers."""
+    root = Path(folder).expanduser().resolve()
+    gt_dir, video_dir = root / 'ground-truth', root / 'videos'
+    if not root.is_dir() or not gt_dir.is_dir() or not video_dir.is_dir():
+        raise ValueError(f'Expected {root}/ground-truth/ and {root}/videos/')
+    gt_files = sorted(p for p in gt_dir.iterdir() if p.is_file() and p.suffix.lower() == '.csv')
+    videos = sorted(p for p in video_dir.iterdir() if p.is_file() and p.suffix.lower() in OPTIMIZE_VIDEO_EXTENSIONS)
+    if not gt_files or not videos:
+        raise ValueError('Optimization requires CSV files in ground-truth/ and videos in videos/')
+    by_stem = {}
+    for video in videos:
+        key = video.stem.casefold()
+        if key in by_stem:
+            raise ValueError(f'Duplicate videos named {video.stem!r} with different extensions')
+        by_stem[key] = video
+    pairs = []
+    matched = set()
+    for csv_path in gt_files:
+        key = csv_path.stem.casefold()
+        if key in matched:
+            raise ValueError(f'Duplicate ground-truth stem: {csv_path.stem}')
+        video = by_stem.get(key)
+        if video is None:
+            raise ValueError(f'No corresponding video found for {csv_path.name}')
+        with csv_path.open(encoding='utf-8-sig', newline='') as handle:
+            reader = csv.DictReader(handle)
+            actual = {c.strip().lower() for c in reader.fieldnames or []}
+            missing = GROUND_TRUTH_COLUMNS - actual
+            if missing:
+                raise ValueError(f'{csv_path.name} missing CSV headers: {sorted(missing)}')
+            count = sum(bool(any(str(v or '').strip() for v in row.values())) for row in reader)
+        if not count:
+            raise ValueError(f'{csv_path.name} has no labeled ants')
+        matched.add(key)
+        pairs.append(OptimizationVideoPair(csv_path.stem, video, csv_path, count))
+    unused = [p.name for k, p in by_stem.items() if k not in matched]
+    if unused:
+        print('Warning: ignoring videos without annotation CSVs:', ', '.join(unused))
+    return OptimizationDataset(root, tuple(pairs))
+
+
+@dataclass(frozen=True)
+class GroundTruthObservation:
+    """Human-labeled ant at one zero-based frame in original video pixels."""
+    timestamp_seconds: float
+    frame_index: int
+    ant_id: str
+    x: float
+    y: float
+
+
+@dataclass(frozen=True)
+class PredictedAntObservation:
+    """Tracked ant at an annotation frame. is_observed=False means Kalman coast."""
+    frame_index: int
+    timestamp_seconds: float
+    predicted_id: int
+    x: float
+    y: float
+    is_observed: bool
+
+
+@dataclass(frozen=True)
+class VideoTrialPredictions:
+    """Ant locations sampled ONLY at annotated frames, after full tracking."""
+    stem: str
+    observations: tuple[PredictedAntObservation, ...]
+
+
+@dataclass(frozen=True)
+class MatchedAntPair:
+    """A spatially valid one-to-one ground-truth/prediction correspondence."""
+    truth: GroundTruthObservation
+    prediction: PredictedAntObservation
+    distance_pixels: float
+
+
+@dataclass(frozen=True)
+class FrameMatchResult:
+    """Matched and unmatched ants for one labeled frame."""
+    frame_index: int
+    matches: tuple[MatchedAntPair, ...]
+    unmatched_truth: tuple[GroundTruthObservation, ...]
+    unmatched_predictions: tuple[PredictedAntObservation, ...]
+
+
+@dataclass(frozen=True)
+class VideoAccuracyMetrics:
+    """Metrics on annotated frames; identity_score penalizes changed IDs."""
+    stem: str
+    true_positives: int
+    false_positives: int
+    false_negatives: int
+    detection_f1: float
+    mean_position_error_px: float | None
+    identity_score: float | None
+    identity_switches: int = 0
+    identity_links: int = 0
+
+
+class GroundTruthReader:
+    """Parse CSV rows and validate frame positions against actual video FPS.
+
+    Treat `frame` as zero-based. Timestamp is checked against frame/fps,
+    but minor rounding of floating video timestamps is tolerated. Text
+    timestamps HH:MM:SS.sss or numeric seconds are both supported.
+    """
+
+    @staticmethod
+    def _time_seconds(value: str) -> float:
+        value = value.strip()
+        if ':' in value:
+            parts = [float(p) for p in value.split(':')]
+            if len(parts) > 3:
+                raise ValueError('Too many colon-separated timestamp fields')
+            return sum(part * (60 ** index) for index, part in enumerate(reversed(parts)))
+        return float(value)
+
+    def load(self, pair: OptimizationVideoPair) -> tuple[GroundTruthObservation, ...]:
+        cap = cv2.VideoCapture(str(pair.video_path))
+        try:
+            if not cap.isOpened():
+                raise ValueError(f'Cannot decode video: {pair.video_path}')
+            fps = float(cap.get(cv2.CAP_PROP_FPS))
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        finally:
+            cap.release()
+        if fps <= 0 or total <= 0 or width <= 0 or height <= 0:
+            raise ValueError(f'Invalid video metadata: {pair.video_path.name}')
+        observations = []
+        seen = set()
+        with pair.ground_truth_path.open(encoding='utf-8-sig', newline='') as handle:
+            reader = csv.DictReader(handle)
+            for line, raw in enumerate(reader, start=2):
+                if not any(str(v or '').strip() for v in raw.values()):
+                    continue
+                row = {k.strip().lower(): v for k, v in raw.items() if k is not None}
+                try:
+                    timestamp = self._time_seconds(str(row['timestamp']))
+                    frame_as_float = float(row['frame'])
+                    frame = int(frame_as_float)
+                    ant_id = str(row['ant_id']).strip()
+                    x, y = float(row['ant_x']), float(row['ant_y'])
+                except (ValueError, KeyError, TypeError) as exc:
+                    raise ValueError(f'{pair.ground_truth_path.name}, row {line}: invalid annotation: {exc}') from exc
+                if not all(math.isfinite(v) for v in (timestamp, frame_as_float, x, y)):
+                    raise ValueError(f'{pair.stem}, row {line}: non-finite field')
+                if frame < 0 or frame >= total or frame_as_float != frame:
+                    raise ValueError(f'{pair.stem}, row {line}: frame {frame_as_float} not in [0, {total-1}]')
+                if not ant_id or not (0 <= x < width and 0 <= y < height):
+                    raise ValueError(f'{pair.stem}, row {line}: invalid ID or coordinate outside {width}x{height}')
+                if timestamp < 0 or abs(timestamp - frame / fps) > max(0.15, 2.0 / fps):
+                    raise ValueError(f'{pair.stem}, row {line}: timestamp {timestamp} disagrees with frame {frame} at {fps:.3f} FPS')
+                key = (frame, ant_id)
+                if key in seen:
+                    raise ValueError(f'{pair.stem}, row {line}: duplicate (frame, ant_id) {key}')
+                seen.add(key)
+                observations.append(GroundTruthObservation(timestamp, frame, ant_id, x, y))
+        if not observations:
+            raise ValueError(f'{pair.stem}: no annotations found')
+        return tuple(sorted(observations, key=lambda v: (v.frame_index, v.ant_id)))
+
+
+# Source defaults that apply to both live GUI and optimizer presets.
+# The live sliders expose the entries from TUNE_SPECS; the extra keys are
+# applied through --settings and through trial-scoped global settings.
+OPTIMIZER_EXTRA_KEYS = ('PROCESS_SCALE', 'BUFFER_ZONE', 'CROSS_HYSTERESIS_FRAMES',
+                        'PATH_CONFIRM_FRAMES')
+OPTIMIZER_SETTINGS_KEYS = tuple(dict.fromkeys((*TUNE_SPECS, *OPTIMIZER_EXTRA_KEYS)))
+
+
+class OptunaParameterSampler:
+    """Sample a concrete candidate, with valid odd morphology kernels.
+
+    Search bounds are intentionally limited to plausible starting ranges.
+    Increase trials/bounds once a baseline is established. Some parameters
+    such as MIN_TRACK_AGE do not affect the current tracker; they are omitted.
+    Crossing-only controls (buffer and hysteresis) also cannot be learned from
+    position-only ground truth: the output preset retains baseline values.
+    """
+    def sample(self, trial) -> dict:
+        params = {
+            'PROCESS_SCALE': trial.suggest_categorical('PROCESS_SCALE', [0.25, 0.35, 0.5]),
+            'DIFF_THRESH': trial.suggest_int('DIFF_THRESH', 5, 55),
+            'FRAME_STRIDE': trial.suggest_int('FRAME_STRIDE', 1, 5),
+            'MIN_BLOB_AREA': trial.suggest_int('MIN_BLOB_AREA', 2, 65),
+            'MAX_BLOB_AREA': trial.suggest_int('MAX_BLOB_AREA', 200, 2200, step=100),
+            'MORPH_CLOSE_SIZE': trial.suggest_categorical('MORPH_CLOSE_SIZE', [1, 3, 5, 7, 9]),
+            'MORPH_OPEN_SIZE': trial.suggest_categorical('MORPH_OPEN_SIZE', [1, 3, 5, 7]),
+            'CLUSTER_DISTANCE': trial.suggest_int('CLUSTER_DISTANCE', 0, 30),
+            'VIBRATION_PCT': trial.suggest_float('VIBRATION_PCT', 4, 30, step=1),
+            'KF_PROC_POS': trial.suggest_float('KF_PROC_POS', 1, 90, log=True),
+            'KF_PROC_VEL': trial.suggest_float('KF_PROC_VEL', 0.5, 30, log=True),
+            'KF_MEAS_POS': trial.suggest_float('KF_MEAS_POS', 0.5, 35, log=True),
+            'MAX_TRACK_DIST': trial.suggest_int('MAX_TRACK_DIST', 12, 100, step=4),
+            'TEMPORAL_MAX_GAP': trial.suggest_int('TEMPORAL_MAX_GAP', 0, 8),
+            'REACQUIRE_DISTANCE_SCALE': trial.suggest_float('REACQUIRE_DISTANCE_SCALE', 1.0, 2.0, step=0.1),
+            'MAX_COAST_FRAMES': trial.suggest_int('MAX_COAST_FRAMES', 0, 10),
+        }
+        # Do not search visualization-only settings, which have no effect on accuracy.
+        # MAX_COAST_FRAMES and TEMPORAL_MAX_GAP jointly limit actual gap retention.
+        return params
+
+    @contextmanager
+    def apply_for_trial(self, params: dict):
+        """Apply optimizer parameters and restore all module globals on exit.
+
+        The existing pipeline reads globals from KalmanFilter2D, Tracker and
+        morphology/detection code; serial trials isolate changes via this
+        context manager. Do not parallelize these trials within one process.
+        """
+        previous = {k: globals()[k] for k in params}
+        try:
+            apply_tune_values(params)
+            yield
+        finally:
+            globals().update(previous)
+
+
+class TrackingTrialRunner:
+    """Run the same frame-difference/morphology/blob/tracker pipeline headlessly.
+
+    Every intermediate frame is processed. Only requested frames are stored.
+    Tracker.update() currently requires circle geometry even for location
+    tracking; supply a dummy, valid circle to preserve identical association
+    and Kalman behavior without requiring manual circle calibration.
+    """
+
+    def run_video(self, pair: OptimizationVideoPair, params: dict,
+                  annotation_frames: tuple[int, ...], progress_callback=None) -> VideoTrialPredictions:
+        # progress_callback(current_frame, total_frames_to_process) is optional.
+        # Called every 10% and on completion to avoid per-frame terminal spam.
+        requested = set(annotation_frames)
+        if not requested:
+            return VideoTrialPredictions(pair.stem, ())
+        scale = float(params['PROCESS_SCALE'])
+        if not (0 < scale <= 1):
+            raise ValueError('PROCESS_SCALE must be in (0,1]')
+        cap = cv2.VideoCapture(str(pair.video_path))
+        if not cap.isOpened():
+            raise ValueError(f'Cannot open video {pair.video_path}')
+        try:
+            fps = float(cap.get(cv2.CAP_PROP_FPS))
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if fps <= 0 or width <= 0 or height <= 0:
+                raise ValueError(f'Invalid video metadata: {pair.stem}')
+            pw, ph = max(1, int(width * scale)), max(1, int(height * scale))
+            frame_pixels = pw * ph
+            vibration_limit = frame_pixels * float(VIBRATION_PCT) / 100.0
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                                       (int(MORPH_CLOSE_SIZE), int(MORPH_CLOSE_SIZE)))
+            kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                                     (int(MORPH_OPEN_SIZE), int(MORPH_OPEN_SIZE)))
+            tracker = Tracker(float(MAX_TRACK_DIST), int(MAX_COAST_FRAMES),
+                              int(CROSS_HYSTERESIS_FRAMES))
+            # Path events are irrelevant to location scoring; use a circle
+            # fully within the image so crossing functions can still run.
+            circle = {'center': (pw / 2, ph / 2),
+                      'radius': max(float(BUFFER_ZONE) + 2.0, min(pw, ph) * 0.30),
+                      'north_angle': 270.0}
+            frame_history = deque(maxlen=int(FRAME_STRIDE) + 1)
+            results = []
+            last_frame = max(requested)
+            total_to_process = last_frame + 1
+            progress_step = max(1, total_to_process // 10)
+            for fid in range(last_frame + 1):
+                okay, frame = cap.read()
+                if not okay:
+                    raise ValueError(f'{pair.stem}: video ended at frame {fid}, before annotation frame {last_frame}')
+                resized = cv2.resize(frame, (pw, ph))
+                gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+                frame_history.append(gray)
+                if len(frame_history) > FRAME_STRIDE:
+                    diff = cv2.absdiff(gray, frame_history[0])
+                    diff = cv2.GaussianBlur(diff, (3, 3), 0)
+                else:
+                    diff = np.zeros_like(gray)
+                _, mask = cv2.threshold(diff, int(DIFF_THRESH), 255, cv2.THRESH_BINARY)
+                # Important: keep the legacy processing behavior, which applies
+                # the shadow suppression to diff AFTER the binary mask is built.
+                diff[gray < 110] = 0
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+                blobs = []
+                if np.count_nonzero(mask) <= vibration_limit:
+                    n, _, stats, centers = cv2.connectedComponentsWithStats(mask)
+                    for i in range(1, n):
+                        area = int(stats[i, cv2.CC_STAT_AREA])
+                        if MIN_BLOB_AREA <= area <= MAX_BLOB_AREA:
+                            blobs.append({'cx': float(centers[i, 0]), 'cy': float(centers[i, 1]),
+                                          'area': area,
+                                          'x': int(stats[i, cv2.CC_STAT_LEFT]),
+                                          'y': int(stats[i, cv2.CC_STAT_TOP]),
+                                          'w': int(stats[i, cv2.CC_STAT_WIDTH]),
+                                          'h': int(stats[i, cv2.CC_STAT_HEIGHT])})
+                    blobs = cluster_blobs(blobs, max_dist=float(CLUSTER_DISTANCE))
+                tracker.update(blobs, circle)
+                if fid in requested:
+                    for ant_id, ant in tracker.ants().items():
+                        results.append(PredictedAntObservation(
+                            fid, fid / fps, int(ant_id), float(ant['cx']) / scale,
+                            float(ant['cy']) / scale,
+                            bool(ant.get('matched_this_frame', False))))
+                if progress_callback is not None and (
+                        (fid + 1) % progress_step == 0 or fid == last_frame):
+                    progress_callback(fid + 1, total_to_process)
+            return VideoTrialPredictions(pair.stem, tuple(results))
+        finally:
+            cap.release()
+
+
+class PredictionAligner:
+    """Ensure ALL annotated frames are scored, including zero-detection frames."""
+    def align(self, ground_truth: tuple[GroundTruthObservation, ...],
+              predictions: VideoTrialPredictions):
+        truth_by_frame = defaultdict(list)
+        predictions_by_frame = defaultdict(list)
+        for truth in ground_truth:
+            truth_by_frame[truth.frame_index].append(truth)
+        for predicted in predictions.observations:
+            predictions_by_frame[predicted.frame_index].append(predicted)
+        return tuple((fid, tuple(truth_by_frame[fid]), tuple(predictions_by_frame[fid]))
+                     for fid in sorted(truth_by_frame))
+
+
+class DetectionMatcher:
+    """One-to-one assignment of GT/predicted centroids at each annotated frame."""
+    def match(self, truth_at_frame, predictions_at_frame,
+              distance_threshold_px: float, frame_index: int = 0) -> FrameMatchResult:
+        truths, predictions = tuple(truth_at_frame), tuple(predictions_at_frame)
+        if not truths or not predictions:
+            return FrameMatchResult(frame_index, (), truths, predictions)
+        positions_t = np.array([(t.x, t.y) for t in truths])
+        positions_p = np.array([(p.x, p.y) for p in predictions])
+        dist = np.linalg.norm(positions_t[:, None, :] - positions_p[None, :, :], axis=2)
+        # Pad with dummy rows/columns so unmatched nodes cost slightly more
+        # than an allowed match; impossible matches have much larger cost.
+        n, m = len(truths), len(predictions)
+        gate = float(distance_threshold_px)
+        size = n + m
+        cost = np.full((size, size), gate + 1.0, dtype=np.float64)
+        cost[:n, :m] = np.where(dist <= gate, dist, 4 * (gate + 1))
+        cost[n:, m:] = 0.0
+        row_idx, col_idx = _hungarian_solve(cost)
+        matched = []
+        mt, mp = set(), set()
+        for i, j in zip(row_idx, col_idx):
+            if i < n and j < m and dist[i, j] <= gate:
+                matched.append(MatchedAntPair(truths[i], predictions[j], float(dist[i, j])))
+                mt.add(int(i))
+                mp.add(int(j))
+        return FrameMatchResult(frame_index, tuple(matched),
+                                tuple(t for i, t in enumerate(truths) if i not in mt),
+                                tuple(p for i, p in enumerate(predictions) if i not in mp))
+
+
+class AccuracyScorer:
+    """Micro-average detection F1 with a small ID-consistency reward.
+
+    ID consistency measures switches when the same ground-truth ant is found
+    in multiple annotated frames. The literal ID numbers do not need to match.
+    Coasting tracks ARE counted in the number of predicted ants.
+    """
+    def score_video(self, stem: str, frame_matches) -> VideoAccuracyMetrics:
+        tp = fp = fn = switches = links = 0
+        distances = []
+        last_pred_for_gt = {}
+        for result in frame_matches:
+            tp += len(result.matches)
+            fp += len(result.unmatched_predictions)
+            fn += len(result.unmatched_truth)
+            for match in result.matches:
+                distances.append(match.distance_pixels)
+                previous = last_pred_for_gt.get(match.truth.ant_id)
+                if previous is not None:
+                    links += 1
+                    if previous != match.prediction.predicted_id:
+                        switches += 1
+                last_pred_for_gt[match.truth.ant_id] = match.prediction.predicted_id
+        f1 = 2 * tp / (2 * tp + fp + fn) if 2 * tp + fp + fn else 1.0
+        identity = (1 - switches / links) if links else None
+        return VideoAccuracyMetrics(stem, tp, fp, fn, f1,
+                                    float(np.mean(distances)) if distances else None,
+                                    identity, switches, links)
+
+    def aggregate(self, per_video_metrics: tuple[VideoAccuracyMetrics, ...]) -> float:
+        tp = sum(v.true_positives for v in per_video_metrics)
+        fp = sum(v.false_positives for v in per_video_metrics)
+        fn = sum(v.false_negatives for v in per_video_metrics)
+        detection_f1 = 2 * tp / (2 * tp + fp + fn) if 2 * tp + fp + fn else 0.0
+        links = sum(v.identity_links for v in per_video_metrics)
+        switches = sum(v.identity_switches for v in per_video_metrics)
+        # When no identities can be compared, only detection F1 contributes.
+        if links == 0:
+            return float(detection_f1)
+        return float(0.90 * detection_f1 + 0.10 * (1.0 - switches / links))
+
+
+class OptimizationResultWriter:
+    """Write a plain numeric JSON preset compatible with --settings and sliders.
+
+    Other files (metrics, trial history, SQLite) are kept in the dataset root.
+    Atomic JSON replacement avoids leaving a partially written settings file.
+    """
+    @staticmethod
+    def _atomic_json(path: Path, payload):
+        temporary = path.with_suffix(path.suffix + '.tmp')
+        try:
+            with temporary.open('w', encoding='utf-8') as fp:
+                json.dump(payload, fp, indent=2, allow_nan=False)
+                fp.write('\n')
+            temporary.replace(path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def save(self, study, output_directory: Path, optimizer) -> None:
+        if not study.best_trials:
+            raise ValueError('No completed trials; optimized settings cannot be written')
+        best = study.best_trial
+        # Save FULL set of current configurable values, not just sampled keys.
+        settings = {k: optimizer.base_settings[k] for k in OPTIMIZER_SETTINGS_KEYS}
+        settings.update(best.params)
+        self._atomic_json(output_directory / 'ant_tuning_parameters.json', settings)
+        # A human-readable summary and complete CSV history are separate from
+        # the plain preset so --settings can parse it without special handling.
+        self._atomic_json(output_directory / 'optuna_results.json', {
+            'best_trial': best.number,
+            'best_objective_score': best.value,
+            'best_trial_params': best.params,
+            'settings_path': 'ant_tuning_parameters.json',
+            'objective': 'F1 if no repeat GT IDs, otherwise 0.90*F1 + 0.10*ID_consistency',
+            'match_distance_px': optimizer.match_distance_px,
+            'ground_truth_coordinate_system': 'original-resolution pixels',
+            'frame_numbering': 'zero-based',
+            'n_complete_trials': sum(t.state == optuna.trial.TrialState.COMPLETE for t in study.trials),
+            'seed': optimizer.seed,
+            'training_videos': [pair.stem for pair in optimizer.dataset.pairs],
+            'per_video_metrics': best.user_attrs.get('per_video_metrics', []),
+        })
+        history = output_directory / 'optuna_trials.csv'
+        with history.open('w', newline='', encoding='utf-8') as fp:
+            fieldnames = ['trial', 'state', 'value', *sorted(OPTIMIZER_SETTINGS_KEYS)]
+            writer = csv.DictWriter(fp, fieldnames=fieldnames)
+            writer.writeheader()
+            for trial in study.trials:
+                writer.writerow({'trial': trial.number, 'state': trial.state.name,
+                                 'value': trial.value if trial.state == optuna.trial.TrialState.COMPLETE else '',
+                                 **trial.params})
+
+
+class AntOptunaOptimizer:
+    """Coordinate reproducible sequential trials and save best runtime preset.
+
+    Persistent SQLite allows resuming the same study. Ground truths are cached
+    because annotations do not change between parameter trials. All source
+    settings are restored after each evaluation, preventing trial leakage.
+    """
+    def __init__(self, dataset: OptimizationDataset, n_trials: int = 30,
+                 match_distance_px: float = 25.0, seed: int = 42):
+        self.dataset = dataset
+        self.n_trials = int(n_trials)
+        self.match_distance_px = float(match_distance_px)
+        self.seed = int(seed)
+        self.ground_truth_reader = GroundTruthReader()
+        self.parameter_sampler = OptunaParameterSampler()
+        self.trial_runner = TrackingTrialRunner()
+        self.prediction_aligner = PredictionAligner()
+        self.matcher = DetectionMatcher()
+        self.accuracy_scorer = AccuracyScorer()
+        self.result_writer = OptimizationResultWriter()
+        self.base_settings = {k: globals()[k] for k in OPTIMIZER_SETTINGS_KEYS}
+        # Fail before launching a long study on a broken CSV/video pair.
+        _opt_progress(f'Loading annotations for {len(dataset.pairs)} video(s)...')
+        self.ground_truth = {}
+        for pair in dataset.pairs:
+            loaded = self.ground_truth_reader.load(pair)
+            self.ground_truth[pair.stem] = loaded
+            _opt_progress(f'  Loaded {pair.stem}: {len(loaded)} labeled ants, '
+                          f'{len({g.frame_index for g in loaded})} annotated frames')
+
+    def create_study(self):
+        """Resume or create a seeded maximize-study persisted in folder root."""
+        storage_path = self.dataset.root / 'ant_optuna_study.sqlite3'
+        storage = optuna.storages.RDBStorage(url=f'sqlite:///{storage_path.as_posix()}')
+        study = optuna.create_study(study_name='ant_tracking_accuracy_v1',
+                                    storage=storage, direction='maximize',
+                                    sampler=optuna.samplers.TPESampler(seed=self.seed),
+                                    load_if_exists=True)
+        # Avoid resuming studies with a different dataset or scoring radius.
+        signature = json.dumps({
+            'pairs': [(p.video_path.name, p.ground_truth_path.name,
+                       p.video_path.stat().st_size, p.ground_truth_path.stat().st_size,
+                       p.video_path.stat().st_mtime_ns, p.ground_truth_path.stat().st_mtime_ns)
+                      for p in self.dataset.pairs],
+            'match_distance_px': self.match_distance_px,
+            'objective_version': 1,
+        }, sort_keys=True)
+        previous_signature = study.user_attrs.get('dataset_signature')
+        if previous_signature is not None and previous_signature != signature:
+            raise ValueError('Existing Optuna database was created for different data/scoring. '
+                             'Move ant_optuna_study.sqlite3 out of the folder to start a fresh study.')
+        study.set_user_attr('dataset_signature', signature)
+        return study
+
+    def objective(self, trial) -> float:
+        """Run every video with sampled settings and score annotated frames."""
+        trial_start = time.monotonic()
+        parameters = self.parameter_sampler.sample(trial)
+        metrics = []
+        _opt_progress(f'Trial {trial.number + 1}: START ({len(self.dataset.pairs)} videos)')
+        with self.parameter_sampler.apply_for_trial(parameters):
+            for video_index, pair in enumerate(self.dataset.pairs, start=1):
+                observations = self.ground_truth[pair.stem]
+                frames = tuple(sorted({g.frame_index for g in observations}))
+                video_start = time.monotonic()
+                _opt_progress(f'  Trial {trial.number + 1} | Video {video_index}/'
+                              f'{len(self.dataset.pairs)}: {pair.video_path.name} | '
+                              f'{len(frames)} annotated frames')
+                last_reported_percent = -1
+
+                def video_progress(current, total):
+                    nonlocal last_reported_percent
+                    # Display percent milestones (roughly every 10%), not every frame.
+                    percent = min(100, int(current * 100 / total))
+                    bucket = percent // 10
+                    if bucket > last_reported_percent:
+                        last_reported_percent = bucket
+                        _opt_progress(f'    {pair.stem}: {percent:3d}% '
+                                      f'({current:,}/{total:,} frames) | '
+                                      f'elapsed {_opt_elapsed(time.monotonic() - video_start)}')
+
+                predicted = self.trial_runner.run_video(
+                    pair, parameters, frames, progress_callback=video_progress)
+                aligned = self.prediction_aligner.align(observations, predicted)
+                frame_results = tuple(self.matcher.match(truth, prediction,
+                                          self.match_distance_px, frame)
+                                      for frame, truth, prediction in aligned)
+                metric = self.accuracy_scorer.score_video(pair.stem, frame_results)
+                metrics.append(metric)
+                _opt_progress(f'  Completed {pair.stem} | F1={metric.detection_f1:.4f} | '
+                              f'elapsed {_opt_elapsed(time.monotonic() - video_start)}')
+        trial.set_user_attr('per_video_metrics', [asdict(v) for v in metrics])
+        score = self.accuracy_scorer.aggregate(tuple(metrics))
+        _opt_progress(f'Trial {trial.number + 1}: DONE | score={score:.5f} | '
+                      f'elapsed {_opt_elapsed(time.monotonic() - trial_start)}')
+        return score
+
+    def execute_study(self) -> None:
+        """Optimize n additional trials and export best preset/metrics/history."""
+        study = self.create_study()
+        completed_before = sum(t.state == optuna.trial.TrialState.COMPLETE
+                               for t in study.trials)
+        _opt_progress(f'Study ready | {len(self.dataset.pairs)} video(s), '
+                      f'{self.n_trials} new trials, {completed_before} previous completed trials')
+        _opt_progress(f'Matching radius: {self.match_distance_px} source pixels')
+        _opt_progress(f'Study database: {self.dataset.root / "ant_optuna_study.sqlite3"}')
+        started = time.monotonic()
+        finished_this_run = 0
+
+        def on_trial_complete(study, trial):
+            nonlocal finished_this_run
+            finished_this_run += 1
+            duration = time.monotonic() - started
+            remaining = max(0, self.n_trials - finished_this_run)
+            eta = remaining * (duration / finished_this_run)
+            score = f'{trial.value:.5f}' if trial.value is not None else trial.state.name
+            _opt_progress(f'PROGRESS {finished_this_run}/{self.n_trials} '
+                          f'({100 * finished_this_run / self.n_trials:.1f}%) | '
+                          f'last={score} | best={study.best_value:.5f} '
+                          f'(trial {study.best_trial.number + 1}) | '
+                          f'elapsed {_opt_elapsed(duration)} | ETA {_opt_elapsed(eta)}')
+
+        study.optimize(self.objective, n_trials=self.n_trials, n_jobs=1,
+                       gc_after_trial=True, callbacks=[on_trial_complete])
+        _opt_progress('Saving optimized parameters and trial history...')
+        self.result_writer.save(study, self.dataset.root, self)
+        _opt_progress(f'FINISHED | best objective={study.best_value:.5f} | '
+                      f'total elapsed {_opt_elapsed(time.monotonic() - started)}')
+        _opt_progress(f'Best settings: {self.dataset.root / "ant_tuning_parameters.json"}')
+        _opt_progress(f'Detailed metrics: {self.dataset.root / "optuna_results.json"}')
+        _opt_progress(f'Trial history: {self.dataset.root / "optuna_trials.csv"}')
+
+    def run(self) -> None:
+        _opt_progress(f'Optimization dataset: {self.dataset.root}')
+        for pair in self.dataset.pairs:
+            _opt_progress(f'  {pair.video_path.name} <-> {pair.ground_truth_path.name} '
+                          f'({pair.annotation_count} labeled ants)')
+        self.execute_study()
+
+
+def run_optimization_mode(folder: str | Path, n_trials: int = 30,
+                          match_distance_px: float = 25.0, seed: int = 42) -> None:
+    """CLI optimization entry point. No Tkinter GUI or preview is opened."""
+    if n_trials < 1:
+        raise ValueError('--trials must be >= 1')
+    if not math.isfinite(match_distance_px) or match_distance_px <= 0:
+        raise ValueError('--match-distance must be a positive finite pixel distance')
+    dataset = load_optimization_dataset(folder)
+    AntOptunaOptimizer(dataset, n_trials, match_distance_px, seed).run()
+
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Ant tracker with optional live tuning controls')
+    parser = argparse.ArgumentParser(description='Ant tracker with GUI, live tuning, and Optuna framework modes')
+    parser.add_argument('--optimize', metavar='FOLDER',
+                        help='Run Optuna tracking optimization on paired ground-truth/ and videos/ data')
+    parser.add_argument('--trials', type=int, default=30, help='Additional Optuna trials to run (default 30)')
+    parser.add_argument('--match-distance', type=float, default=25.0, help='GT matching distance in original pixels (default 25)')
+    parser.add_argument('--seed', type=int, default=42, help='Optuna sampler seed (default 42)')
     parser.add_argument('--tune-mode', '--control-tune-mode', dest='tune_mode',
                         nargs='?', const='True', default='False',
                         help='Show interactive OpenCV trackbars (True/False)')
@@ -2302,6 +2995,14 @@ def main():
     parser.add_argument('--settings', help='JSON tuning preset to load for tuning or batch processing')
     args = parser.parse_args()
     enabled = str(args.tune_mode).strip().lower() in ('1', 'true', 'yes', 'on')
+    if args.optimize is not None:
+        if enabled:
+            parser.error('--optimize and --tune-mode cannot be used together')
+        try:
+            run_optimization_mode(args.optimize, args.trials, args.match_distance, args.seed)
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
+        return
     if enabled:
         video = args.video
         if not video:
