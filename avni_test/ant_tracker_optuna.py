@@ -2462,16 +2462,13 @@ class FrameMatchResult:
 
 @dataclass(frozen=True)
 class VideoAccuracyMetrics:
-    """Metrics on annotated frames; identity_score penalizes changed IDs."""
+    """Ant-detection metrics at labeled frames; ground-truth IDs are ignored."""
     stem: str
     true_positives: int
     false_positives: int
     false_negatives: int
     detection_f1: float
     mean_position_error_px: float | None
-    identity_score: float | None
-    identity_switches: int = 0
-    identity_links: int = 0
 
 
 class GroundTruthReader:
@@ -2689,7 +2686,7 @@ class TrackingTrialRunner:
 
 
 class PredictionAligner:
-    """Ensure ALL annotated frames are scored, including zero-detection frames."""
+    """Align annotated frames; include observed detections only, not Kalman ghosts."""
     def align(self, ground_truth: tuple[GroundTruthObservation, ...],
               predictions: VideoTrialPredictions):
         truth_by_frame = defaultdict(list)
@@ -2697,7 +2694,8 @@ class PredictionAligner:
         for truth in ground_truth:
             truth_by_frame[truth.frame_index].append(truth)
         for predicted in predictions.observations:
-            predictions_by_frame[predicted.frame_index].append(predicted)
+            if predicted.is_observed:
+                predictions_by_frame[predicted.frame_index].append(predicted)
         return tuple((fid, tuple(truth_by_frame[fid]), tuple(predictions_by_frame[fid]))
                      for fid in sorted(truth_by_frame))
 
@@ -2734,45 +2732,46 @@ class DetectionMatcher:
 
 
 class AccuracyScorer:
-    """Micro-average detection F1 with a small ID-consistency reward.
+    """Score ant DETECTION only, independent of object tracking identity.
 
-    ID consistency measures switches when the same ground-truth ant is found
-    in multiple annotated frames. The literal ID numbers do not need to match.
-    Coasting tracks ARE counted in the number of predicted ants.
+    A true positive is one one-to-one spatial match between a predicted ant
+    center and a labeled ant center within --match-distance source pixels.
+    Any unmatched prediction is a false positive; any unmatched label is a
+    false negative. Ground-truth ant_id and the track's predicted_id NEVER
+    enter the objective, so ID switches, reassignments, and differing numbers
+    do not directly affect optimization. Each annotated frame is evaluated
+    separately; micro-averaging gives every labeled ant the same weight.
+
+    Only actual detected/matched centroids are scored. Kalman-only estimates
+    of an invisible ant are excluded upstream by PredictionAligner, since the
+    goal is DETECTION rather than maintaining a track without a measurement.
     """
     def score_video(self, stem: str, frame_matches) -> VideoAccuracyMetrics:
-        tp = fp = fn = switches = links = 0
+        tp = fp = fn = 0
         distances = []
-        last_pred_for_gt = {}
         for result in frame_matches:
             tp += len(result.matches)
             fp += len(result.unmatched_predictions)
             fn += len(result.unmatched_truth)
-            for match in result.matches:
-                distances.append(match.distance_pixels)
-                previous = last_pred_for_gt.get(match.truth.ant_id)
-                if previous is not None:
-                    links += 1
-                    if previous != match.prediction.predicted_id:
-                        switches += 1
-                last_pred_for_gt[match.truth.ant_id] = match.prediction.predicted_id
-        f1 = 2 * tp / (2 * tp + fp + fn) if 2 * tp + fp + fn else 1.0
-        identity = (1 - switches / links) if links else None
-        return VideoAccuracyMetrics(stem, tp, fp, fn, f1,
-                                    float(np.mean(distances)) if distances else None,
-                                    identity, switches, links)
+            distances.extend(match.distance_pixels for match in result.matches)
+        f1 = 2 * tp / (2 * tp + fp + fn) if (2 * tp + fp + fn) else 1.0
+        return VideoAccuracyMetrics(
+            stem=stem, true_positives=tp, false_positives=fp,
+            false_negatives=fn, detection_f1=float(f1),
+            mean_position_error_px=(float(np.mean(distances)) if distances else None),
+        )
 
     def aggregate(self, per_video_metrics: tuple[VideoAccuracyMetrics, ...]) -> float:
+        """Micro-average F1 across ALL annotated frames in ALL training videos.
+
+        Optuna maximizes the detection F1 exactly, with no ID consistency
+        bonus or penalty. Returning 0 when no detections/labels occur avoids
+        falsely optimizing an entirely empty annotation dataset.
+        """
         tp = sum(v.true_positives for v in per_video_metrics)
         fp = sum(v.false_positives for v in per_video_metrics)
         fn = sum(v.false_negatives for v in per_video_metrics)
-        detection_f1 = 2 * tp / (2 * tp + fp + fn) if 2 * tp + fp + fn else 0.0
-        links = sum(v.identity_links for v in per_video_metrics)
-        switches = sum(v.identity_switches for v in per_video_metrics)
-        # When no identities can be compared, only detection F1 contributes.
-        if links == 0:
-            return float(detection_f1)
-        return float(0.90 * detection_f1 + 0.10 * (1.0 - switches / links))
+        return float(2 * tp / (2 * tp + fp + fn)) if (2 * tp + fp + fn) else 0.0
 
 
 class OptimizationResultWriter:
@@ -2808,7 +2807,7 @@ class OptimizationResultWriter:
             'best_objective_score': best.value,
             'best_trial_params': best.params,
             'settings_path': 'ant_tuning_parameters.json',
-            'objective': 'F1 if no repeat GT IDs, otherwise 0.90*F1 + 0.10*ID_consistency',
+            'objective': 'Detection-only micro-averaged F1 (spatial matching, no identity score)',
             'match_distance_px': optimizer.match_distance_px,
             'ground_truth_coordinate_system': 'original-resolution pixels',
             'frame_numbering': 'zero-based',
@@ -2862,7 +2861,7 @@ class AntOptunaOptimizer:
         """Resume or create a seeded maximize-study persisted in folder root."""
         storage_path = self.dataset.root / 'ant_optuna_study.sqlite3'
         storage = optuna.storages.RDBStorage(url=f'sqlite:///{storage_path.as_posix()}')
-        study = optuna.create_study(study_name='ant_tracking_accuracy_v1',
+        study = optuna.create_study(study_name='ant_detection_accuracy_v2',
                                     storage=storage, direction='maximize',
                                     sampler=optuna.samplers.TPESampler(seed=self.seed),
                                     load_if_exists=True)
@@ -2873,7 +2872,8 @@ class AntOptunaOptimizer:
                        p.video_path.stat().st_mtime_ns, p.ground_truth_path.stat().st_mtime_ns)
                       for p in self.dataset.pairs],
             'match_distance_px': self.match_distance_px,
-            'objective_version': 1,
+            'objective_version': 2,
+            'scoring': 'observed_ant_detection_f1_no_ids',
         }, sort_keys=True)
         previous_signature = study.user_attrs.get('dataset_signature')
         if previous_signature is not None and previous_signature != signature:
@@ -2921,7 +2921,7 @@ class AntOptunaOptimizer:
                               f'elapsed {_opt_elapsed(time.monotonic() - video_start)}')
         trial.set_user_attr('per_video_metrics', [asdict(v) for v in metrics])
         score = self.accuracy_scorer.aggregate(tuple(metrics))
-        _opt_progress(f'Trial {trial.number + 1}: DONE | score={score:.5f} | '
+        _opt_progress(f'Trial {trial.number + 1}: DONE | detection F1={score:.5f} | '
                       f'elapsed {_opt_elapsed(time.monotonic() - trial_start)}')
         return score
 
@@ -2932,6 +2932,7 @@ class AntOptunaOptimizer:
                                for t in study.trials)
         _opt_progress(f'Study ready | {len(self.dataset.pairs)} video(s), '
                       f'{self.n_trials} new trials, {completed_before} previous completed trials')
+        _opt_progress('Objective: ANT DETECTION F1 ONLY (ground-truth IDs ignored)')
         _opt_progress(f'Matching radius: {self.match_distance_px} source pixels')
         _opt_progress(f'Study database: {self.dataset.root / "ant_optuna_study.sqlite3"}')
         started = time.monotonic()
