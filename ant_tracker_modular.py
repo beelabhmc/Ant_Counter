@@ -45,9 +45,9 @@
 #
 # INPUT CONVENTIONS:
 #   videos/foo.mp4 pairs with ground-truth/foo.csv (same stem).
-#   Regression ground truth can be a SINGLE CSV file with Video Title,
-#     NW Enter, NW Exit, NE Enter, NE Exit, SW Enter, SW Exit, SE Enter,
-#     SE Exit (one row per video), OR directory with one per-video CSV
+#   Regression ground truth can be a SINGLE CSV file with Video Title, Colony ID,
+#     Video Date, and NW/NE/SW/SE Enter/Exit columns (one row per video),
+#     OR directory with one per-video CSV
 #     (quadrant,ins,outs; wide format and event CSVs also supported).
 #   Regression outputs include regression_results.csv (long form),
 #     regression_summary.json (OLS slope, intercept, R², r, p, RMSE, MAE),
@@ -112,7 +112,10 @@ import threading
 import time
 import math
 import re
-from datetime import timedelta
+import subprocess
+import hashlib
+import sys
+from datetime import datetime, timezone, timedelta
 import optuna
 from scipy.optimize import linear_sum_assignment as _hungarian_solve
 
@@ -2965,8 +2968,9 @@ def _regression_circle(video: Path, gt_directory: Path, circle_file: str | None)
 def _regression_truth_catalog(source: str, quadrant: str | None):
     """Read EITHER a consolidated Representative Sample Counts CSV OR per-video CSVs.
 
-    A consolidated CSV has one row per video and a 'Video Title' column plus
-    NW Enter, NW Exit, NE Enter, NE Exit, SW Enter, SW Exit, SE Enter, SE Exit.
+    A consolidated CSV has one row per video and columns:
+    Video Title, Colony ID, Video Date, then each quadrant's Enter and Exit.
+    Colony ID and Video Date are retained as metadata in the regression outputs.
     Video Title may include its extension; names are matched case-insensitively.
     Per-video CSV mode retains prior long, wide, or crossing-event formats.
     Missing quadrant columns are not silently treated as zero.
@@ -2990,12 +2994,21 @@ def _regression_truth_catalog(source: str, quadrant: str | None):
             columns = {c.strip().lower().replace('_', ' ') for c in (reader.fieldnames or [])}
             if 'video title' in columns:
                 # Consolidated annotated sample count table.
+                required_metadata = {'video title', 'colony id', 'video date'}
+                missing_metadata = required_metadata - columns
+                if missing_metadata:
+                    raise ValueError(
+                        f'{csv_file}: consolidated regression CSV is missing required '
+                        f'metadata columns: {", ".join(sorted(missing_metadata))}. '
+                        'Expected Video Title, Colony ID, Video Date, followed by quadrant Enter/Exit columns.')
                 for raw in reader:
                     row = {str(k).strip().lower().replace('_', ' '): (v or '').strip()
                            for k, v in raw.items() if k is not None}
                     video_title = row.get('video title', '')
                     if not video_title:
                         raise ValueError(f'{csv_file}: blank Video Title')
+                    colony_id = row.get('colony id', '')
+                    video_date = row.get('video date', '')
                     stem = Path(video_title).stem.casefold()
                     if stem in catalog:
                         raise ValueError(f'Duplicate ground-truth Video Title: {video_title!r}')
@@ -3016,13 +3029,13 @@ def _regression_truth_catalog(source: str, quadrant: str | None):
                     if quadrant:
                         truth = {quadrant: truth[quadrant]} if quadrant in truth else {}
                     if truth:
-                        catalog[stem] = (video_title, truth, csv_file)
+                        catalog[stem] = (video_title, truth, csv_file, colony_id, video_date)
             else:
                 # Existing per-video CSV format.
                 stem = csv_file.stem.casefold()
                 if stem in catalog:
                     raise ValueError(f'Duplicate ground-truth CSV stem: {csv_file.stem}')
-                catalog[stem] = (csv_file.stem, _regression_read_truth(csv_file, quadrant), csv_file)
+                catalog[stem] = (csv_file.stem, _regression_read_truth(csv_file, quadrant), csv_file, '', '')
     if not catalog:
         raise ValueError(f'No usable labeled quadrant counts in {source_path}')
     return catalog
@@ -3135,6 +3148,74 @@ def _regression_plot(comparison: list[dict], result: dict, destination: Path, sh
     plt.close(fig)
 
 
+def _git_metadata(source_file: Path) -> dict:
+    """Capture the source revision used for this run; gracefully handle non-git copies."""
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(source_file.resolve().parent), *args],
+            check=True, capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+
+    metadata = {"repository_detected": False, "commit_hash": None,
+                "commit_short_hash": None, "commit_date": None,
+                "branch": None, "working_tree_dirty": None}
+    try:
+        metadata.update({
+            "repository_detected": True,
+            "commit_hash": git("rev-parse", "HEAD"),
+            "commit_date": git("show", "-s", "--format=%cI", "HEAD"),
+            "branch": git("branch", "--show-current") or None,
+            "working_tree_dirty": bool(git("status", "--porcelain")),
+        })
+        metadata["commit_short_hash"] = metadata["commit_hash"][:12]
+    except (subprocess.SubprocessError, OSError):
+        metadata["git_note"] = "Git metadata unavailable (not a Git checkout or Git command failed)."
+    try:
+        metadata["source_file_sha256"] = hashlib.sha256(source_file.read_bytes()).hexdigest()
+    except OSError:
+        metadata["source_file_sha256"] = None
+    return metadata
+
+
+def _runtime_parameter_snapshot() -> dict:
+    """Return the effective module-level parameter values, including defaults."""
+    keys = list(TUNE_SPECS) + ["PROCESS_SCALE", "BUFFER_ZONE",
+                               "CROSS_HYSTERESIS_FRAMES", "PATH_CONFIRM_FRAMES"]
+    return {key: globals()[key] for key in keys if key in globals()}
+
+
+def _write_regression_run_metadata(output: Path, parameters_file: str | None,
+                                   videos: list[Path], pairs: list[tuple],
+                                   circle_file: str | None, render_video: bool) -> Path:
+    """Write provenance beside regression metrics for reproducible comparisons."""
+    script_path = Path(__file__).resolve()
+    settings_path = Path(parameters_file).expanduser().resolve() if parameters_file else None
+    settings_sha256 = None
+    if settings_path and settings_path.is_file():
+        settings_sha256 = hashlib.sha256(settings_path.read_bytes()).hexdigest()
+    payload = {
+        "metadata_schema_version": 1,
+        "run_started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "script": {"file_name": script_path.name, "absolute_path": str(script_path),
+                   "source_file_sha256": hashlib.sha256(script_path.read_bytes()).hexdigest()},
+        "git": _git_metadata(script_path),
+        "parameters": {"file": str(settings_path) if settings_path else None,
+                       "file_sha256": settings_sha256,
+                       "effective_runtime_values": _runtime_parameter_snapshot()},
+        "execution": {"command_line": sys.argv, "videos_directory": str(Path(videos[0]).parent),
+                      "video_count_found": len(videos), "video_count_evaluated": len(pairs),
+                      "render_video": bool(render_video),
+                      "shared_circle_file": str(Path(circle_file).expanduser().resolve()) if circle_file else None},
+        "videos": [{"video": str(item[0]), "ground_truth_title": item[1],
+                    "colony_id": item[6], "video_date": item[7],
+                    "ground_truth_csv": str(item[5]), "circle_file": str(item[4])}
+                   for item in pairs],
+    }
+    destination = output / "regression_run_metadata.json"
+    destination.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+    return destination
+
+
 def run_regression_mode(ground_truth_dir: str, videos_dir: str,
                         parameters_file: str | None = None,
                         quadrant: str | None = None, circle_file: str | None = None,
@@ -3167,7 +3248,7 @@ def run_regression_mode(ground_truth_dir: str, videos_dir: str,
     labels = _regression_truth_catalog(str(gt_path), quadrant)
     video_catalog = {v.stem.casefold(): v for v in videos}
     unmatched_videos = sorted(v.name for v in videos if v.stem.casefold() not in labels)
-    unmatched_truth = sorted(name for stem, (name, _, _) in labels.items() if stem not in video_catalog)
+    unmatched_truth = sorted(item[0] for stem, item in labels.items() if stem not in video_catalog)
     for name in unmatched_videos:
         print(f'WARNING: no ground truth for video {name}; skipping', flush=True)
     for name in unmatched_truth:
@@ -3176,17 +3257,19 @@ def run_regression_mode(ground_truth_dir: str, videos_dir: str,
     for video in videos:
         if video.stem.casefold() not in labels:
             continue
-        title, truth, csv_path = labels[video.stem.casefold()]
+        title, truth, csv_path, colony_id, video_date = labels[video.stem.casefold()]
         circle, circle_path = _regression_circle(video, gt_path.parent if gt_path.is_file() else gt_path,
                                                  circle_file)
-        pairs.append((video, title, truth, circle, circle_path, csv_path))
+        pairs.append((video, title, truth, circle, circle_path, csv_path, colony_id, video_date))
     if not pairs:
         raise ValueError('No videos matched Video Title values or per-video ground-truth CSV names')
+    metadata_path = _write_regression_run_metadata(output, parameters_file, videos, pairs,
+                                                   circle_file, render_video)
     comparison = []
     long_rows = []
     per_video = []
     totals = {q: {'gt_in': 0, 'gt_out': 0, 'pred_in': 0, 'pred_out': 0} for q in _QUADRANTS}
-    for index, (video, title, truth, circle, circle_path, truth_path) in enumerate(pairs, 1):
+    for index, (video, title, truth, circle, circle_path, truth_path, colony_id, video_date) in enumerate(pairs, 1):
         print(f'[{index}/{len(pairs)}] Processing {video.name} | circle={circle_path.name}', flush=True)
         def progress(pct, msg):
             if pct > 0 and 'Frame ' in msg:
@@ -3202,7 +3285,8 @@ def run_regression_mode(ground_truth_dir: str, videos_dir: str,
             gt_in, gt_out = expected['enter'], expected['exit']
             pred_in, pred_out = int(entered[q]), int(exited[q])
             in_error, out_error = pred_in - gt_in, pred_out - gt_out
-            row = {'video': video.name, 'quadrant': q,
+            row = {'video': video.name, 'video_title': title,
+                   'colony_id': colony_id, 'video_date': video_date, 'quadrant': q,
                    'ground_truth_in': gt_in, 'predicted_in': pred_in, 'in_error': in_error,
                    'in_abs_error': abs(in_error),
                    'ground_truth_out': gt_out, 'predicted_out': pred_out, 'out_error': out_error,
@@ -3211,7 +3295,8 @@ def run_regression_mode(ground_truth_dir: str, videos_dir: str,
                    'exact_match': int(in_error == 0 and out_error == 0)}
             comparison.append(row); video_rows.append(row)
             for direction, gt, predicted in (('enters', gt_in, pred_in), ('exits', gt_out, pred_out)):
-                long_rows.append({'stem': video.stem, 'quadrant': q,
+                long_rows.append({'stem': video.stem, 'video_title': title,
+                                  'colony_id': colony_id, 'video_date': video_date, 'quadrant': q,
                                   'direction': direction, 'predicted': predicted,
                                   'ground_truth': gt, 'squared_error': (predicted - gt)**2,
                                   'absolute_error': abs(predicted - gt)})
@@ -3220,6 +3305,7 @@ def run_regression_mode(ground_truth_dir: str, videos_dir: str,
             print(f'  {q}: IN {pred_in} / GT {gt_in} (error {in_error:+d}); '
                   f'OUT {pred_out} / GT {gt_out} (error {out_error:+d})', flush=True)
         per_video.append({'video': video.name, 'video_title': title,
+                          'colony_id': colony_id, 'video_date': video_date,
                           'circle_file': str(circle_path), 'ground_truth_csv': str(truth_path),
                           'ground_truth': truth, 'comparison': video_rows,
                           'event_csv': paths['csv'], 'annotated_video': paths['video']})
@@ -3245,7 +3331,7 @@ def run_regression_mode(ground_truth_dir: str, videos_dir: str,
                'settings_file': str(parameters_file) if parameters_file else None,
                'settings_applied': params, 'per_video': per_video,
                'files': {'comparison': str(comparison_path), 'results': str(csv_path),
-                         'plot': str(plot_path)}}
+                         'plot': str(plot_path), 'run_metadata': str(metadata_path)}}
     summary_path = output / 'regression_summary.json'
     summary_path.write_text(json.dumps(summary, indent=2), encoding='utf-8')
     print('\n── Linear regression: predicted ~ ground truth ──', flush=True)
@@ -3259,7 +3345,7 @@ def run_regression_mode(ground_truth_dir: str, videos_dir: str,
               f'  {label:<22}: {v if v is not None else "N/A"}', flush=True)
     if fit['fit_note']:
         print(f"  NOTE: {fit['fit_note']}", flush=True)
-    print(f'\nSaved: {csv_path}\n       {comparison_path}\n       {plot_path}\n       {summary_path}', flush=True)
+    print(f'\nSaved: {csv_path}\n       {comparison_path}\n       {plot_path}\n       {summary_path}\n       {metadata_path}', flush=True)
     return summary
 
 
