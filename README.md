@@ -11,11 +11,20 @@ After you install conda, install the packages in the requirements.txt using the 
 ## Running the scripts
 
 ### Ant Annotator 
-In the ant folder, 
+- default parameters
+- ground truth from the ant annotator 
+- using the ant_annotator py
+
 ### Ant Tracking
+- running with gui 
+
+- runnign with cli 
+
+- running batch style, recursively
+
 
 ### Hyperparameter Optimization 
-
+- using ground truth 
 ### Regression 
 put photo of regression graph on here
 
