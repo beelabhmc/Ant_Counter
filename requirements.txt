@@ -9,3 +9,4 @@ pandas
 pillow
 scipy
 opencv
+optuna

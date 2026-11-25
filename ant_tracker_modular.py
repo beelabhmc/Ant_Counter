@@ -1,98 +1,143 @@
+#!/usr/bin/env python3
 # ============================================================================
 # ANT HOLE COUNTER — UNIFIED COMMAND LINE (GUI / BATCH / REGRESSION / OPTUNA)
 # ============================================================================
-# COMMANDS (choose ONE mode):
+# COMMANDS (choose ONE mode; no mode flag opens the GUI):
 #   python ant_tracker_modular.py
-#       Open the normal GUI for selecting and processing a video.
-#   python ant_tracker_modular.py --run --videos ./videos
-#       Process every supported video headlessly (no GUI).
-#   python ant_tracker_modular.py --regression ./counts --videos ./videos
-#       Compare actual per-quadrant IN/OUT counts against per-video CSVs.
-#   python ant_tracker_modular.py --regression ./representative_sample.csv --videos ./videos
-#       Compare to ONE thesis-style CSV with Video Title, NW Enter/Exit, etc.;
-#       calculate OLS regression statistics and save a two-panel graph.
+#       Open the GUI (single video or a whole folder; see GUI below).
+#   python ant_tracker_modular.py --gui --videos ./videos --recursive
+#       Open the GUI with --run options pre-filled (all except --circle-file;
+#       nothing starts until you click Process).
+#   python ant_tracker_modular.py --run --videos ./videos [--recursive] [--strict]
+#   python ant_tracker_modular.py --run --video ./videos/GX010287.MP4
+#   python ant_tracker_modular.py --run --video ./day1/A.MP4 --video ./day2/B.MP4
+#       Process video(s) headlessly (no GUI).
+#   python ant_tracker_modular.py --regression ./counts.csv --videos ./videos
+#       Compare per-quadrant IN/OUT counts with ONE consolidated CSV (Video Title,
+#       Colony ID, Video Date, NW Enter/Exit, ...) or a folder of per-video CSVs;
+#       fit OLS regression statistics and save a two-panel graph.
+#   python ant_tracker_modular.py --gui --regression ./counts.csv --videos ./videos
+#       The same in the GUI's Regression tab (pre-filled; click Run). The
+#       plain GUI also has the Regression tab.
 #   python ant_tracker_modular.py --optimize --ground-truth ./labels --videos ./videos
+#   python ant_tracker_modular.py --optimize ./dataset      (dataset/{ground-truth,videos}/)
 #       Use Optuna to optimize ant DETECTION F1 from positional annotations.
-#   python ant_tracker_modular.py --optimize ./dataset
-#       Backward-compatible layout: ./dataset/{ground-truth,videos}/.
 #
-# REUSABLE OPTIONS (apply to multiple modes):
-#   --videos DIR            Video folder for --run, --regression and --optimize.
-#   --video FILE            Single video file for --run (instead of --videos).
-#   --parameters FILE       JSON processing preset for GUI, --run, regression,
-#                           and starting/base settings for Optuna. --settings is
-#                           a backward-compatible alias for the same option.
-#   --circle-file FILE      Shared entrance circle calibration for --run or
-#                           regression (otherwise per-video *_circle.json).
-#   --output DIR            Common output root for batch/regression/Optuna.
-#   --render-video          Generate annotated MP4 in batch/regression (off by
-#                           default to save time); --no-render-video disables.
-#   --ground-truth DIR      Annotation CSV directory for --optimize; alternatively
-#                           sets regression count CSV directory with --regression.
+# SHARED OPTIONS:
+#   --videos DIR            Video folder for --run, --gui, --regression, --optimize.
+#   --video FILE            A video for --run or --gui (instead of --videos);
+#                           repeat it for several videos from any folders.
+#                           Their outputs go directly in the output folder.
+#   --parameters FILE       JSON parameter preset (GUI, --run, regression; base
+#                           settings for Optuna). --settings is an alias.
+#   --circle-file FILE      One circle for every video (--run, --gui, regression).
+#   --output DIR            Output root for batch/regression/Optuna.
+#   --render-video          Write annotated MP4s (off by default in headless
+#                           modes; --no-render-video disables).
+#   --ground-truth PATH     Count CSV(s) for --regression or position CSVs for
+#                           --optimize.
+#   --no-prompt             Never prompt for missing inputs (see PROMPTS).
+#   --code-version TEXT     GitHub version (commit, tag, release) to record in
+#                           the run metadata. --run and --regression ask for it
+#                           in a terminal (Enter = version detected from git);
+#                           the GUI asks before each run.
 #
-# MODE OPTIONS:
-#   --run                   Process video(s) using the normal tracking pipeline.
-#   --regression [CSV|DIR]  Compare quadrant entry/exit counts with counts CSVs.
-#                           Can omit DIR when --ground-truth DIR is provided.
+# BATCH OPTIONS (--run and --gui):
+#   --recursive             Include every subfolder of --videos. Skips hidden
+#                           folders, macOS ._ files, *_counted.mp4 renders and
+#                           the output folder. Outputs mirror the folder tree:
+#                           videos/a/b/X.MP4 -> <output>/a/b/X_*.
+#   --strict                Stop BEFORE processing if any circle is missing or
+#                           invalid, and stop at the first video that fails.
+#                           Without it those videos are skipped and recorded.
+#   At the end, every skipped / failed / not-run video is listed with its
+#   reason. Exit code: 0 = done (skipped videos are fine), 1 = at least one
+#   video FAILED (the rest were still processed), 2 = stopped early
+#   (--strict, bad --circle-file, or nothing processable).
+#
+# REGRESSION / OPTUNA OPTIONS:
 #   --quadrant NE|SE|SW|NW  Restrict regression to one labeled quadrant.
-#   --show-plot             Show regression figure interactively (saved as PNG
-#                           regardless; omit for servers/headless automation).
-#   --optimize [DATASET]    Run Optuna detection-F1 tuning; DATASET is optional
-#                           when --videos and --ground-truth are supplied.
+#   --show-plot             Also show the regression figure (PNG is always saved).
+#   --skip-missing-circles  Regression: skip and list matched videos that have
+#                           no valid circle, instead of stopping the run.
 #   --trials N              Additional Optuna trials (default 30).
 #   --match-distance PX     Detection-match radius in original pixels (default 25).
 #   --seed N                Optuna sampler random seed (default 42).
 #
+# CIRCLE LOOKUP for --run / --gui folder runs (first match wins):
+#   1. --circle-file FILE (used for every video)
+#   2. <video's folder>/<stem>_circle.json
+#   3. <output folder>/<stem>_circle.json  (mirrored subfolder when recursive;
+#      so circles the GUI wrote to its output folder are reused directly)
+#   Every circle is checked before processing starts and a summary is printed:
+#   "Found 42 video(s) | 40 with circles | 2 missing | 0 invalid".
+#   Regression keeps its own lookup: video folder, ground-truth folder,
+#   videos/circles/, or --circle-file.
+#
+# PROMPTS: in an interactive terminal, a missing REQUIRED input (the video
+#   folder/file for --run; ground truth + videos for --regression; dataset or
+#   ground truth + videos for --optimize) is asked for instead of erroring.
+#   Paths are checked as typed (quotes, drag-and-drop escapes and ~ handled),
+#   3 tries each, empty answer or Ctrl-C cancels, and the equivalent full
+#   command is printed. Scripts/pipes/--no-prompt get the usual error.
+#   Contradictory flags are always errors.
+#
+# OUTPUT DEFAULTS:
+#   --run: <folder>/batch_results for --videos, ./outputs for --video.
+#   regression: ./videos/regression_results/regression_<date-time>/ (a new
+#     folder for every run, so results are never overwritten).
+#   Optuna: dataset/ or ./videos/optuna_results; each run's results go in
+#     optuna_<date-time>/ inside it (the study database stays at the top so
+#     later runs resume the study).
+#
+# METADATA: every --run, regression and Optuna run writes run_metadata.json
+#   (regression: regression_run_metadata.json) with the date and time, the
+#   code version entered, git details, the command, the parameter file and
+#   the exact parameter values used.
+#
 # INPUT CONVENTIONS:
 #   videos/foo.mp4 pairs with ground-truth/foo.csv (same stem).
-#   Regression ground truth can be a SINGLE CSV file with Video Title, Colony ID,
-#     Video Date, and NW/NE/SW/SE Enter/Exit columns (one row per video),
-#     OR directory with one per-video CSV
-#     (quadrant,ins,outs; wide format and event CSVs also supported).
-#   Regression outputs include regression_results.csv (long form),
-#     regression_summary.json (OLS slope, intercept, R², r, p, RMSE, MAE),
-#     regression_comparison.csv, regression_plot.png and raw event files.
 #   Optuna position CSV: timestamp,frame,ant_id,ant_x,ant_y, with zero-based
 #     frame indices and source-resolution x/y pixel coordinates.
-#   Circle calibration: videos/foo_circle.json or ground-truth/foo_circle.json;
-#     a shared --circle-file overrides individual files.
-#   --output defaults: ./videos/batch_results for --run;
-#     ./videos/regression_results for regression; dataset/ or ./videos/optuna_results
-#     for Optuna, depending on invocation.
 #
 # NOTES:
 # * --regression FITS OLS on predicted vs ground-truth count pairs;
 #   reports fit quality and counting errors. It does NOT tune parameters.
 # * --optimize scores detected positions, NOT entrance counts.
-# * Interactive OpenCV live tuning and its command-line flags were removed.
+# * The GUI and --run share plan_batch()/execute_batch(), so they behave and
+#   write batch_summary.json identically.
 # * Detection uses frame differencing, Kalman filtering and Hungarian matching.
 # ============================================================================
-#!/usr/bin/env python3
 """
 Ant Hole Counter
 ================
-UI for counting ants entering and exiting an anthill.
+Counts ants entering and exiting an anthill, per compass quadrant.
 
 Detection method: frame-to-frame difference (NOT background subtraction).
   Comparing adjacent frames detects only things that MOVED, so static shadows
   — even if they look very different from the median background — register as
   zero motion and are ignored.  Moving ants show up clearly.
 
-Usage:
-    python ant_tracker_optuna.py
-    python ant_tracker_modular.py --optimize folder/
-
-Workflow:
-    1. Click Browse… to load a video.
-    2. Select an output directory
-    3. Scrub the frame slider to find a good view of the hole entrance.
-    4. Click to define the center of the entrance and the direction of north
-    5. Click "Process Video".  Results are written to the output directory.
+GUI workflow:
+    1. "Videos": add video files from any folders (Add videos…, Add a
+       folder's videos…, or drag & drop files/folders onto the window), or
+       "Folder": choose one folder (optionally "Include subfolders").
+       Drag & drop needs: pip install tkinterdnd2
+    2. Optionally load a parameter preset and choose an output folder.
+    3. Scrub the frame slider to a clear view of the hole entrance.
+    4. Click the entrance center, then click toward north; set the radius.
+       Choose where circles come from: "Find <name>_circle.json in the input
+       and output folders" (as --run does), or "Click it manually in the GUI"
+       (double-click each video in the table and click its circle).
+    5. Click Process. "Copy CLI command" gives the equivalent --run command.
 
 Outputs (per video):
     <name>_counts.csv       — timestamp, event (enter/exit), running count
-    <name>_counted.mp4      — annotated video with live count overlay
-    <name>_circle.json     — circle parameters (center, radius, north_angle)
+    <name>_summary.csv      — enters/exits per quadrant
+    <name>_ant_boxes.csv    — per-frame ant boxes
+    <name>_circle.json      — circle parameters (center, radius, north_angle)
+    <name>_counted.mp4      — annotated video (when rendering is on)
+    batch_summary.json      — one per run, at the output root
 """
 
 from __future__ import annotations
@@ -101,8 +146,6 @@ from dataclasses import dataclass, asdict
 from contextlib import contextmanager
 from collections import deque, defaultdict
 from pathlib import Path
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
 import cv2
 import numpy as np
 import os
@@ -112,21 +155,55 @@ import threading
 import time
 import math
 import re
+import shlex
 import subprocess
 import hashlib
 import sys
 from datetime import datetime, timezone, timedelta
-import optuna
 from scipy.optimize import linear_sum_assignment as _hungarian_solve
+
+# GUI-only and Optuna-only dependencies are optional so that headless modes
+# (--run, --regression) work on machines without a display stack or Optuna.
+# Each mode checks for what it needs and exits with an install hint.
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox, filedialog, simpledialog
+except ImportError:  # pragma: no cover - depends on the Python build
+    tk = ttk = messagebox = filedialog = simpledialog = None
 
 try:
     from PIL import Image, ImageTk
-except ImportError:
-    raise SystemExit(
-        "Pillow is required.  Install it with:\n"
-        "    pip install Pillow\n"
-        "then re-run this script."
-    )
+except ImportError:  # pragma: no cover
+    Image = ImageTk = None
+
+# Optional: drag & drop of files/folders onto the GUI (pip install tkinterdnd2).
+# Without it the GUI works the same, minus drag & drop.
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+except Exception:  # pragma: no cover - ImportError, or Tk missing
+    TkinterDnD = DND_FILES = None
+
+try:
+    import optuna
+except ImportError:  # pragma: no cover
+    optuna = None
+
+
+def _require_gui_dependencies():
+    """Exit with a clear message if Tkinter or Pillow is unavailable."""
+    missing = []
+    if tk is None:
+        missing.append("tkinter (install a Python build with Tk support)")
+    if Image is None or ImageTk is None:
+        missing.append("Pillow  (pip install Pillow)")
+    if missing:
+        raise SystemExit("The GUI needs:\n  " + "\n  ".join(missing))
+
+
+def _require_optuna():
+    """Exit with a clear message if Optuna is unavailable."""
+    if optuna is None:
+        raise SystemExit("--optimize needs Optuna:  pip install optuna")
 
 
 # --- Cluster blobs to reduce shadow double-counting ---
@@ -400,13 +477,19 @@ def _load_circle_json(path: str) -> dict | None:
     except (json.JSONDecodeError, OSError, TypeError):
         return None
 
-# Writes the circle calibration to JSON. Known issue: the existing-file
-# check prevents saving to a newly selected filename. Left unchanged here.
+# Writes the circle calibration to JSON (creating or replacing the file).
+# Returns the path written, or None when no path was given.
 def _save_circle_json(circle_params, path: str):
-    if not path or not os.path.isfile(path):
+    if not path:
         return None
+    params = dict(circle_params)
+    if "center" in params:
+        params["center"] = [float(params["center"][0]), float(params["center"][1])]
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
     with open(path, "w") as f:
-        json.dump({"circle_params": circle_params}, f, indent=2)
+        json.dump({"circle_params": params}, f, indent=2)
+    return path
 
 # Packages video-space center/radius and computes north angle from a clicked point.
 def _circle_params_dict(center, radius, north_point) -> dict:
@@ -636,6 +719,16 @@ class CirclePreviewMixin:
                 fg="#006600")
             if hasattr(self, "_refresh_proc_btn"):
                 self._refresh_proc_btn()
+        else:
+            return
+        self._notify_circle_edited()
+
+    # Hook for subclasses: called whenever the preview circle is edited by hand
+    # (click, clear, radius change) so they can mark it as unsaved.
+    def _notify_circle_edited(self):
+        hook = getattr(self, "_circle_edited", None)
+        if hook is not None:
+            hook()
 
     # No action on double-click when editing circle calibration.
     def _dblclick(self, event):
@@ -656,12 +749,21 @@ class CirclePreviewMixin:
             self._render()
         if hasattr(self, "_refresh_proc_btn"):
             self._refresh_proc_btn()
+        self._notify_circle_edited()
 
     # Updates preview radius when user changes radius control.
-    def _on_radius_change(self):
-        self.circle_radius = float(self._radius_var.get())
+    def _on_radius_change(self, _event=None):
+        try:
+            radius = float(self._radius_var.get())
+        except (tk.TclError, ValueError):
+            return  # half-typed value in the spinbox; wait for a valid number
+        if radius <= 0 or radius == self.circle_radius:
+            return
+        self.circle_radius = radius
         if self.current_bgr is not None:
             self._render()
+        if self.circle_center is not None:
+            self._notify_circle_edited()
 
     # Handles user scrub position and renders selected frame.
     def _on_slider(self, val):
@@ -1316,8 +1418,11 @@ class VideoProcessor:
                  progress_cb, status_cb,
                  out_dir: str | None = None,
                  stem: str | None = None,
-                 render_video: bool = True):
+                 render_video: bool = True,
+                 cancel_event: threading.Event | None = None):
         self.render_video = render_video
+        # Optional shared Event (batch runs): setting it cancels this video too.
+        self._cancel_event = cancel_event
         self.video_path = video_path # full path to video for processing
         if not out_dir:
             self.out_dir = os.path.join(os.path.abspath(os.path.curdir),"outputs")
@@ -1337,6 +1442,9 @@ class VideoProcessor:
     # Requests cooperative cancellation; next iteration of frame loop will stop.
     def cancel(self):
         self._cancel = True
+
+    def _cancelled(self) -> bool:
+        return self._cancel or bool(self._cancel_event and self._cancel_event.is_set())
     
     # ------------------------------------------------------------------
     # Reads video metadata, scales circle coordinates, writes calibration JSON,
@@ -1346,7 +1454,12 @@ class VideoProcessor:
         Returns (events, enter_totals, exit_totals, paths_dict) 
         or (None, None, None, None)."""
         cap = cv2.VideoCapture(self.video_path)
-        fps      = cap.get(cv2.CAP_PROP_FPS)
+        if not cap.isOpened():
+            cap.release()
+            raise ValueError(f"Cannot open video: {self.video_path}")
+        fps      = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        if not math.isfinite(fps) or fps <= 0:
+            fps = 30.0
         total    = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         orig_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         orig_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -1399,7 +1512,7 @@ class VideoProcessor:
             elif e["event"].startswith("exit_"):
                 exit_totals[quad] += 1
 
-        if self._cancel:
+        if self._cancelled():
             return None, None, None, None
 
         # Write the previously missing per-video summary. This is the exact
@@ -1469,7 +1582,7 @@ class VideoProcessor:
                       "x_max", "y_max", "status"]]
 
         for fid in range(total):
-            if self._cancel:
+            if self._cancelled():
                 break
             ret, frame = cap.read()
             if not ret:
@@ -1753,325 +1866,1204 @@ class VideoProcessor:
 # Main Application
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Tkinter user interface for choosing video/output, editing the circle,
-# starting the worker thread, showing progress and reporting saved outputs.
+# Tkinter GUI with everything --run has, plus a video list built from any
+# folders and drag & drop: add video files (from as many folders as you like)
+# or a whole folder (optionally including subfolders), parameter presets,
+# circles (clicked in the GUI, or found as <name>_circle.json files),
+# output folder, render/strict options and a
+# copyable equivalent command. Processing goes through plan_batch() and
+# execute_batch(), exactly the functions the CLI uses.
 class App(CirclePreviewMixin):
-    # Creates window, initializes video/circle state and builds interface.
-    def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("Ant Hole Counter")
-        self.root.geometry("1300x760")
-        self.root.minsize(900, 600)
+    # Table colours per row state.
+    ROW_COLORS = {
+        "ready": "#1b5e20", "missing": "#b00020", "invalid": "#b00020",
+        "running": "#0d47a1", "processed": "#0d47a1", "failed": "#b00020",
+        "skipped": "#757575", "cancelled": "#757575",
+    }
+    # Circle sources shown in the table for circles clicked in the GUI.
+    CLICKED = "clicked in GUI"
+    CLICKED_UNSAVED = "clicked in GUI (not saved)"
 
-        # ── state ──
-        self.video_path: str | None = None
+    def __init__(self, prefill: dict | None = None):
+        _require_gui_dependencies()
+        # Drag & drop needs a TkinterDnD root; fall back to plain Tk if the
+        # tkdnd library cannot load on this machine.
+        self._dnd = False
+        root = None
+        if TkinterDnD is not None:
+            try:
+                root = TkinterDnD.Tk()
+                self._dnd = True
+            except Exception:
+                root = None
+        self.root = root or tk.Tk()
+        self.root.title("Ant Hole Counter")
+        self.root.geometry("1400x900")
+        self.root.minsize(1000, 640)
+
+        # ── preview state (used by CirclePreviewMixin), VIDEO pixel coords ──
+        self.video_path: str | None = None      # video shown in the preview
         self.cap = None
         self.fps = 30.0
         self.total_frames = 0
         self.orig_w = self.orig_h = 0
         self.current_bgr = None
-
-        # circle setup in VIDEO pixel coords
-        self.circle_center: tuple = None  # (x, y)
-        self.circle_radius: float = DEFAULT_RADIUS
-        self.north_point: tuple = None    # (x, y) for north direction
+        self.circle_center: tuple = None
+        self.circle_radius: float = float(DEFAULT_RADIUS)
+        self.north_point: tuple = None
         self.circle_complete: bool = False
-
-        # canvas display info
         self.disp_off_x = self.disp_off_y = 0
         self.disp_scale = 1.0
         self._photo = None
 
-        self.processor: VideoProcessor | None = None
-        self._slider_dragging = False
-        self.out_dir: str | None = None
+        # ── run inputs (mirror the --run options) ──
+        self.video_files: list[str] = []        # --video (repeatable), any folders
+        self.folder: str | None = None          # --videos
+        self.out_dir: str | None = None         # --output
+        self.parameters_file: str | None = None  # --parameters
+        self.parameter_values: dict = dict(DEFAULT_PARAMETERS)
+        # Circles clicked for individual videos in "Click it manually" mode:
+        # resolved video path -> (circle, saved file path or None=unsaved).
+        self.video_circles: dict[str, tuple[dict, str | None]] = {}
+        # File the preview circle came from; None = drawn/edited, not saved.
+        self.circle_source_path: str | None = None
+        self._suspend_circle_hook = False
+        self._render_touched = False
+        # GitHub version recorded in run metadata; asked before each run.
+        self.code_version: str | None = None
 
+        # ── batch state ──
+        self.plan: BatchPlan | None = None
+        self._plan_error = ""
+        self._iid_by_item: dict[int, str] = {}
+        self._run_order: dict[int, tuple[int, int]] = {}
+        self._busy = False
+        self._cancel_event: threading.Event | None = None
 
         self._build_ui()
+        self.regression = RegressionTab(self._reg_tab, self)
+        self._register_drop_targets()
+        self.regression.register_drop_targets(self._dnd)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        prefill = prefill or {}
+        self.code_version = prefill.get("code_version") or None
+        self._apply_prefill(prefill)
+        self._on_input_mode()
+        if prefill.get("regression"):
+            self.regression.apply_prefill(prefill["regression"])
+            self.notebook.select(self._reg_tab)
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════
     # UI construction
-    # ══════════════════════════════════════════════════════════════════════════
-
-    # Creates every Tkinter widget, binds event handlers, and lays out sidebar,
-    # preview canvas, controls, and progress/status displays.
+    # ══════════════════════════════════════════════════════════════════════
     def _build_ui(self):
-        pane = tk.PanedWindow(self.root, orient=tk.HORIZONTAL,
+        self.input_mode = tk.StringVar(value="files")         # files | folder
+        self.recursive_var = tk.BooleanVar(value=False)
+        self.strict_var = tk.BooleanVar(value=False)
+        self.render_var = tk.BooleanVar(value=False)
+        # files: find <name>_circle.json in the input/output folders (as --run)
+        # manual: every video's circle is clicked in the GUI
+        self.circle_mode = tk.StringVar(value="files")
+
+        # Two tabs: counting (this class) and regression (RegressionTab).
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+        count_tab = tk.Frame(self.notebook)
+        self._reg_tab = tk.Frame(self.notebook)
+        self.notebook.add(count_tab, text="  Count ants  ")
+        self.notebook.add(self._reg_tab, text="  Regression  ")
+        pane = tk.PanedWindow(count_tab, orient=tk.HORIZONTAL,
                               sashwidth=6, sashrelief=tk.RAISED, bg="#333")
         pane.pack(fill=tk.BOTH, expand=True)
+        side = self._scrollable_sidebar(pane)
 
-        # ── sidebar ──────────────────────────────────────────────────
-        sidebar = tk.Frame(pane, width=270, bg="#f4f4f4", padx=8, pady=8)
-        pane.add(sidebar, minsize=240)
+        tk.Label(side, text="🐜  Ant Hole Counter",
+                 font=("Arial", 15, "bold"), bg="#f4f4f4").pack(pady=(2, 8))
 
-        tk.Label(sidebar, text="🐜  Ant Hole Counter",
-                 font=("Arial", 15, "bold"), bg="#f4f4f4").pack(pady=(4, 10))
+        # ── Input ──────────────────────────────────────────────────────
+        box = self._panel(side, "Input")
+        row = tk.Frame(box)
+        row.pack(fill=tk.X, padx=4, pady=2)
+        ttk.Radiobutton(row, text="Videos (any folders)", value="files",
+                        variable=self.input_mode,
+                        command=self._on_input_mode).pack(side=tk.LEFT)
+        ttk.Radiobutton(row, text="Folder", value="folder",
+                        variable=self.input_mode,
+                        command=self._on_input_mode).pack(side=tk.LEFT, padx=10)
+        holder = tk.Frame(box)
+        holder.pack(fill=tk.X)
+        self._files_box = tk.Frame(holder)
+        row = tk.Frame(self._files_box)
+        row.pack(fill=tk.X, padx=4, pady=1)
+        tk.Button(row, text="Add videos…", command=self._add_videos_dialog).pack(
+            side=tk.LEFT, expand=True, fill=tk.X)
+        tk.Button(row, text="Add a folder's videos…",
+                  command=self._add_folder_dialog).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        row = tk.Frame(self._files_box)
+        row.pack(fill=tk.X, padx=4, pady=1)
+        tk.Button(row, text="Remove selected", command=self._remove_selected).pack(
+            side=tk.LEFT, expand=True, fill=tk.X)
+        tk.Button(row, text="Clear list", command=self._clear_list).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        self._folder_box = tk.Frame(holder)
+        tk.Button(self._folder_box, text="Choose folder…", relief=tk.GROOVE,
+                  command=self._choose_folder_dialog).pack(fill=tk.X, padx=4, pady=2)
+        self._recursive_chk = ttk.Checkbutton(
+            box, text="Include subfolders (--recursive)",
+            variable=self.recursive_var, command=self._on_recursive)
+        self._recursive_chk.pack(anchor=tk.W, padx=4, pady=(2, 2))
+        self._drop_lbl = tk.Label(box, text="", relief=tk.GROOVE, bd=2, height=2,
+                                  font=("Arial", 9), fg="#555", bg="#fafafa",
+                                  wraplength=260)
+        self._drop_lbl.pack(fill=tk.X, padx=4, pady=3)
+        self._input_lbl = self._note(box, "")
+        self._info_lbl = tk.Label(box, text="", font=("Courier", 8),
+                                  justify=tk.LEFT, fg="#444")
+        self._info_lbl.pack(anchor=tk.W, padx=4)
 
-        # Video
-        vf = ttk.LabelFrame(sidebar, text="  Video  ")
-        vf.pack(fill=tk.X, pady=4)
+        # ── Parameters ─────────────────────────────────────────────────
+        box = self._panel(side, "Parameters")
+        self._params_lbl = self._note(box, "Defaults (built-in values)")
+        row = tk.Frame(box)
+        row.pack(fill=tk.X, padx=4, pady=(0, 4))
+        tk.Button(row, text="Load…", command=self._load_parameters).pack(
+            side=tk.LEFT, expand=True, fill=tk.X)
+        tk.Button(row, text="Reset", command=self._reset_parameters).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(row, text="View values", command=self._view_parameters).pack(
+            side=tk.LEFT, expand=True, fill=tk.X)
 
-        tk.Button(vf, text="Browse…", width=20, relief=tk.GROOVE,
-                  command=self.browse_video).pack(pady=(1, 4))
-
-        self._info_lbl = tk.Label(sidebar, text="", font=("Courier", 8),
-                                  justify=tk.LEFT, bg="#f4f4f4", fg="#444")
-        self._info_lbl.pack(anchor=tk.W, pady=2)
-
-        # Output
-        outf = ttk.LabelFrame(sidebar, text="  Output location  ")
-        outf.pack(fill=tk.X, pady=4)
-        self._out_dir_lbl = tk.Label(
-            outf,
-            text="Output folder: default in ./outputs",
-            font=("Arial", 8), fg="#444", justify=tk.LEFT, anchor=tk.W,
-            wraplength=250)
-        self._out_dir_lbl.pack(fill=tk.X, padx=4, pady=(4, 2))
-        tk.Button(
-            outf, text="Select output folder…",
-            command=self._select_out_dir).pack(fill=tk.X, padx=4, pady=(0, 2))
-        tk.Button(
-            outf, text="Clear output folder",
-            command=self._clear_out_dir).pack(fill=tk.X, padx=4, pady=(0, 4))
-
-        # Frame scrub
-        ff = ttk.LabelFrame(sidebar, text="  Frame  ")
-        ff.pack(fill=tk.X, pady=4)
+        # ── Frame scrub ────────────────────────────────────────────────
+        box = self._panel(side, "Preview frame")
         self._frame_var = tk.IntVar()
-        self._slider = ttk.Scale(ff, from_=0, to=100,
-                                 variable=self._frame_var, orient=tk.HORIZONTAL,
-                                 command=self._on_slider)
+        self._slider = ttk.Scale(box, from_=0, to=100, variable=self._frame_var,
+                                 orient=tk.HORIZONTAL, command=self._on_slider)
         self._slider.pack(fill=tk.X, padx=4, pady=2)
-        self._frame_lbl = tk.Label(ff, text="—", font=("Arial", 8))
+        self._frame_lbl = tk.Label(box, text="—", font=("Arial", 8))
         self._frame_lbl.pack()
 
-        # Circle Setup
-        cf = ttk.LabelFrame(sidebar, text="  Circle Setup  ")
-        cf.pack(fill=tk.X, pady=4)
-        tk.Label(cf,
-                 text=("1st click: Set center\n"
-                       "2nd click: Set north direction\n"
-                       "Right-click: Clear setup"),
+        # ── Circle ─────────────────────────────────────────────────────
+        box = self._panel(side, "Circle")
+        tk.Label(box, text=("1st click: center   2nd click: north\n"
+                            "Right-click: clear"),
                  font=("Arial", 8), justify=tk.LEFT).pack(anchor=tk.W, padx=4)
-        self._circle_lbl = tk.Label(cf, text="No circle defined",
-                                    fg="#b00", font=("Arial", 9, "bold"))
-        self._circle_lbl.pack(pady=2)
-        
-        # Radius adjustment
-        radius_frame = tk.Frame(cf)
-        radius_frame.pack(fill=tk.X, padx=4, pady=2)
-        tk.Label(radius_frame, text="Radius:", font=("Arial", 8)).pack(side=tk.LEFT)
+        self._circle_lbl = tk.Label(box, text="No circle defined", fg="#b00",
+                                    font=("Arial", 9, "bold"), wraplength=270,
+                                    justify=tk.LEFT)
+        self._circle_lbl.pack(anchor=tk.W, padx=4, pady=2)
+        row = tk.Frame(box)
+        row.pack(fill=tk.X, padx=4, pady=2)
+        tk.Label(row, text="Radius (px):", font=("Arial", 8)).pack(side=tk.LEFT)
         self._radius_var = tk.IntVar(value=DEFAULT_RADIUS)
-        radius_spinbox = tk.Spinbox(radius_frame, from_=50, to=500, 
-                                   textvariable=self._radius_var, width=8,
-                                   command=self._on_radius_change)
-        radius_spinbox.pack(side=tk.LEFT, padx=(5,0))
-        
-        tk.Button(cf, text="Clear Circle",
-                  command=self.clear_circle).pack(pady=(0, 4))
+        spin = tk.Spinbox(row, from_=10, to=5000, textvariable=self._radius_var,
+                          width=7, command=self._on_radius_change)
+        spin.pack(side=tk.LEFT, padx=(5, 0))
+        spin.bind("<Return>", self._on_radius_change)
+        spin.bind("<FocusOut>", self._on_radius_change)
+        row = tk.Frame(box)
+        row.pack(fill=tk.X, padx=4, pady=2)
+        tk.Button(row, text="Save circle…", command=self._save_circle).pack(
+            side=tk.LEFT, expand=True, fill=tk.X)
+        tk.Button(row, text="Clear", command=self.clear_circle).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
 
-        # Process
-        prf = ttk.LabelFrame(sidebar, text="  Process  ")
-        prf.pack(fill=tk.X, pady=4)
+        ttk.Separator(box).pack(fill=tk.X, padx=4, pady=4)
+        tk.Label(box, text="Where each video's circle comes from:",
+                 font=("Arial", 8, "bold")).pack(anchor=tk.W, padx=4)
+        ttk.Radiobutton(box, text="Find <name>_circle.json in the input and\n"
+                                  "output folders (same as the CLI)",
+                        value="files", variable=self.circle_mode,
+                        command=self._on_circle_mode).pack(anchor=tk.W, padx=4)
+        ttk.Radiobutton(box, text="Click it manually in the GUI\n(each video separately)",
+                        value="manual", variable=self.circle_mode,
+                        command=self._on_circle_mode).pack(anchor=tk.W, padx=4)
+        self._circle_mode_lbl = self._note(
+            box, "Looks next to each video first, then in the output folder.")
+
+        # ── Output ─────────────────────────────────────────────────────
+        box = self._panel(side, "Output")
+        self._out_dir_lbl = self._note(box, "")
+        row = tk.Frame(box)
+        row.pack(fill=tk.X, padx=4, pady=(0, 4))
+        tk.Button(row, text="Select output folder…",
+                  command=self._select_out_dir).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        tk.Button(row, text="Use default",
+                  command=self._clear_out_dir).pack(side=tk.LEFT, padx=(2, 0))
+
+        # ── Options ────────────────────────────────────────────────────
+        box = self._panel(side, "Options")
+        ttk.Checkbutton(box, text="Render annotated MP4 (--render-video)",
+                        variable=self.render_var,
+                        command=self._on_render_toggle).pack(anchor=tk.W, padx=4)
+        ttk.Checkbutton(box, text="Strict (--strict): no skipping; stop on errors",
+                        variable=self.strict_var,
+                        command=self._refresh_proc_btn).pack(anchor=tk.W, padx=4)
+
+        # ── Process ────────────────────────────────────────────────────
+        box = self._panel(side, "Process")
         self._proc_btn = tk.Button(
-            prf, text="▶  Process Video",
-            font=("Arial", 11, "bold"),
+            box, text="▶  Process", font=("Arial", 11, "bold"),
             bg="#2e7d32", fg="white", state=tk.DISABLED,
             activebackground="#1b5e20", activeforeground="white",
             command=self.start_processing)
-        self._proc_btn.pack(fill=tk.X, padx=4, pady=4)
-        self._cancel_btn = tk.Button(
-            prf, text="Cancel", state=tk.DISABLED,
-            command=self.cancel_processing)
-        self._cancel_btn.pack(fill=tk.X, padx=4, pady=(0, 4))
-
+        self._proc_btn.pack(fill=tk.X, padx=4, pady=(4, 0))
+        self._proc_hint = tk.Label(box, text="", font=("Arial", 8), fg="#8a5a00",
+                                   wraplength=270, justify=tk.LEFT)
+        self._proc_hint.pack(anchor=tk.W, padx=4)
+        self._cancel_btn = tk.Button(box, text="Cancel", state=tk.DISABLED,
+                                     command=self.cancel_processing)
+        self._cancel_btn.pack(fill=tk.X, padx=4, pady=(2, 4))
+        self._overall_lbl = tk.Label(box, text="", font=("Arial", 9, "bold"),
+                                     wraplength=270, justify=tk.LEFT)
+        self._overall_lbl.pack(anchor=tk.W, padx=4)
         self._prog_var = tk.DoubleVar()
-        self._prog_bar = ttk.Progressbar(prf, variable=self._prog_var, maximum=100)
-        self._prog_bar.pack(fill=tk.X, padx=4, pady=2)
-        self._prog_lbl = tk.Label(prf, text="", font=("Arial", 8))
-        self._prog_lbl.pack()
+        ttk.Progressbar(box, variable=self._prog_var, maximum=100).pack(
+            fill=tk.X, padx=4, pady=2)
+        self._prog_lbl = tk.Label(box, text="", font=("Arial", 8),
+                                  wraplength=270, justify=tk.LEFT)
+        self._prog_lbl.pack(anchor=tk.W, padx=4)
+        tk.Button(box, text="Copy CLI command",
+                  command=self._copy_cli_command).pack(fill=tk.X, padx=4, pady=4)
 
-        # Status
-        self._status_lbl = tk.Label(
-            sidebar,
-            text="Load a video to get started.",
-            wraplength=250, justify=tk.LEFT,
-            font=("Arial", 9), fg="#333", bg="#f4f4f4")
+        self._status_lbl = tk.Label(side, text="Add videos or choose a folder to get started.",
+                                    wraplength=280, justify=tk.LEFT,
+                                    font=("Arial", 9), fg="#333", bg="#f4f4f4")
         self._status_lbl.pack(pady=6, anchor=tk.W)
 
-        # ── canvas ───────────────────────────────────────────────────
-        cf = tk.Frame(pane, bg="#111")
-        pane.add(cf, minsize=500)
-
-        self.canvas = tk.Canvas(cf, bg="#111", cursor="crosshair",
+        # ── right side: preview canvas over the video table ────────────
+        right = tk.PanedWindow(pane, orient=tk.VERTICAL, sashwidth=6,
+                               sashrelief=tk.RAISED, bg="#333")
+        pane.add(right, minsize=500)
+        canvas_frame = tk.Frame(right, bg="#111")
+        right.add(canvas_frame, minsize=250)
+        self.canvas = tk.Canvas(canvas_frame, bg="#111", cursor="crosshair",
                                 highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
-
-        self.canvas.bind("<Button-1>",        self._click)
+        self.canvas.bind("<Button-1>", self._click)
         self.canvas.bind("<Double-Button-1>", self._dblclick)
-        self.canvas.bind("<Button-3>",        self._rclick)
-        self.canvas.bind("<Configure>",       self._resize)
+        self.canvas.bind("<Button-3>", self._rclick)
+        self.canvas.bind("<Button-2>", self._rclick)   # macOS right-click
+        self.canvas.bind("<Configure>", self._resize)
 
-    # Allows user to select the output directory.
-    def _select_out_dir(self):
-        out_dir = filedialog.askdirectory(title="Select output folder")
-        if not out_dir:
-            return
-        self.out_dir = out_dir
-        self._update_out_dir_label()
+        table_frame = tk.Frame(right)
+        right.add(table_frame, minsize=140, height=260)
+        top = tk.Frame(table_frame)
+        top.pack(fill=tk.X, padx=4, pady=2)
+        self._plan_lbl = tk.Label(top, text="", font=("Arial", 9, "bold"), anchor=tk.W)
+        self._plan_lbl.pack(side=tk.LEFT)
+        tk.Button(top, text="Refresh", command=self._refresh_plan).pack(side=tk.RIGHT)
+        tk.Label(top, text="Double-click a video to preview it or fix its circle",
+                 font=("Arial", 8), fg="#666").pack(side=tk.RIGHT, padx=8)
+        body = tk.Frame(table_frame)
+        body.pack(fill=tk.BOTH, expand=True)
+        self.table = ttk.Treeview(body, columns=("status", "details"),
+                                  show="tree headings", selectmode="extended")
+        self.table.heading("#0", text="Video")
+        self.table.heading("status", text="Status")
+        self.table.heading("details", text="Circle / details")
+        self.table.column("#0", width=340, stretch=False)
+        self.table.column("status", width=100, stretch=False)
+        self.table.column("details", width=560)
+        for tag, colour in self.ROW_COLORS.items():
+            self.table.tag_configure(tag, foreground=colour)
+        bar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self.table.yview)
+        self.table.configure(yscrollcommand=bar.set)
+        bar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.table.bind("<Double-1>", self._on_table_double)
+        self.table.bind("<Delete>", lambda e: self._remove_selected())
+        self.table.bind("<BackSpace>", lambda e: self._remove_selected())
 
-    # Resets the selected output directory.
-    def _clear_out_dir(self):
-        self.out_dir = None
-        self._update_out_dir_label()
+    def _scrollable_sidebar(self, pane):
+        """A vertically scrollable sidebar so all panels fit on small screens."""
+        outer = tk.Frame(pane, bg="#f4f4f4")
+        pane.add(outer, minsize=300, width=330)
+        canvas = tk.Canvas(outer, bg="#f4f4f4", highlightthickness=0)
+        bar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+        inner = tk.Frame(canvas, bg="#f4f4f4", padx=8, pady=6)
+        window = canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(window, width=e.width))
+        canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        prefix = str(canvas)
 
-    # Updates UI text displaying the selected output directory.
-    def _update_out_dir_label(self):
-        if self.out_dir is None:
-            self._out_dir_lbl.config(
-                text="Output folder: default in ./outputs")
-            return
+        def on_wheel(event):
+            # Only scroll when the pointer is over the sidebar.
+            if not str(event.widget).startswith(prefix):
+                return
+            if getattr(event, "num", None) == 4:
+                step = -1
+            elif getattr(event, "num", None) == 5:
+                step = 1
+            else:
+                delta = event.delta
+                step = -int(delta / 120) if abs(delta) >= 120 else -int(delta)
+            if step:
+                canvas.yview_scroll(step, "units")
+
+        self.root.bind_all("<MouseWheel>", on_wheel, add="+")
+        self.root.bind_all("<Button-4>", on_wheel, add="+")
+        self.root.bind_all("<Button-5>", on_wheel, add="+")
+        return inner
+
+    @staticmethod
+    def _panel(parent, title):
+        frame = ttk.LabelFrame(parent, text=f"  {title}  ")
+        frame.pack(fill=tk.X, pady=4)
+        return frame
+
+    @staticmethod
+    def _note(parent, text):
+        label = tk.Label(parent, text=text, font=("Arial", 8), fg="#444",
+                         justify=tk.LEFT, anchor=tk.W, wraplength=270)
+        label.pack(fill=tk.X, padx=4, pady=(2, 2))
+        return label
+
+    @staticmethod
+    def _set_enabled(widgets, enabled: bool):
+        for widget in widgets:
+            if isinstance(widget, ttk.Widget):
+                widget.state(["!disabled"] if enabled else ["disabled"])
+            else:
+                widget.config(state=tk.NORMAL if enabled else tk.DISABLED)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Drag & drop
+    # ══════════════════════════════════════════════════════════════════════
+    def _register_drop_targets(self):
+        """Accept dropped files/folders on the preview, table and drop box."""
+        if self._dnd:
+            try:
+                for widget in (self.canvas, self.table, self._drop_lbl):
+                    widget.drop_target_register(DND_FILES)
+                    widget.dnd_bind("<<Drop>>", self._on_drop)
+                self._drop_lbl.dnd_bind("<<DropEnter>>",
+                                        lambda e: self._drop_highlight(e, True))
+                self._drop_lbl.dnd_bind("<<DropLeave>>",
+                                        lambda e: self._drop_highlight(e, False))
+            except Exception:
+                self._dnd = False
+        if self._dnd:
+            self._drop_lbl.config(
+                text="⬇  Drop videos or folders here\n(or onto the preview / table)")
         else:
-            self._out_dir_lbl.config(
-                text=f"Output folder: {self.out_dir}")
-    
-    # ══════════════════════════════════════════════════════════════════════════
-    # Video loading
-    # ══════════════════════════════════════════════════════════════════════════
+            self._drop_lbl.config(
+                text="Drag & drop is off. To turn it on:\npip install tkinterdnd2")
 
-    # Routes video-loading action through the UI.
+    def _drop_highlight(self, event, on: bool):
+        self._drop_lbl.config(bg="#e3f2fd" if on else "#fafafa")
+        return getattr(event, "action", None)
+
+    def _on_drop(self, event):
+        self._drop_lbl.config(bg="#fafafa")
+        try:
+            paths = list(self.root.tk.splitlist(event.data))
+        except Exception:
+            paths = [event.data]
+        self.handle_dropped_paths(paths)
+        return getattr(event, "action", None)
+
+    def handle_dropped_paths(self, paths: list[str]):
+        """Dropped files are added to the video list. A single folder dropped in
+        Folder mode becomes the folder; otherwise a folder's videos are added
+        to the list (including subfolders when that box is ticked)."""
+        if self._busy:
+            self._status("Busy processing; drop videos again when it finishes.")
+            return
+        folders = [p for p in paths if os.path.isdir(p)]
+        files = [p for p in paths if os.path.isfile(p)]
+        if self.input_mode.get() == "folder" and len(folders) == 1 and not files:
+            self._set_folder(folders[0])
+            return
+        if self.input_mode.get() != "files":
+            self.input_mode.set("files")
+            self._on_input_mode_quiet()
+        added, rejected = self._add_paths(files, folders)
+        self._after_list_change(added)
+        self._report_added(added, rejected)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Thread-safe UI helpers
+    # ══════════════════════════════════════════════════════════════════════
+    def _ui(self, fn):
+        """Run fn on the Tk main loop (safe to call from the worker thread)."""
+        self.root.after(0, fn)
+
+    def _status(self, msg: str):
+        self._ui(lambda m=msg: self._status_lbl.config(text=m))
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Input: video list (any folders) or one folder
+    # ══════════════════════════════════════════════════════════════════════
+    def _apply_prefill(self, prefill: dict):
+        params = prefill.get("parameters")
+        if params:
+            self._set_parameters_from_file(params, show_errors=True)
+        if prefill.get("output"):
+            self.out_dir = str(Path(prefill["output"]).expanduser().resolve())
+        self.strict_var.set(bool(prefill.get("strict")))
+        files = _as_file_list(prefill.get("video"))
+        if files:
+            self.input_mode.set("files")
+            self._add_paths(files, [])
+        elif prefill.get("videos"):
+            self.input_mode.set("folder")
+            self.folder = str(Path(prefill["videos"]).expanduser().resolve())
+            self.recursive_var.set(bool(prefill.get("recursive")))
+        if prefill.get("render_video"):
+            self.render_var.set(True)
+            self._render_touched = True
+
+    def _on_input_mode(self):
+        files_mode = self.input_mode.get() == "files"
+        if files_mode:
+            self._folder_box.pack_forget()
+            self._files_box.pack(fill=tk.X)
+        else:
+            self._files_box.pack_forget()
+            self._folder_box.pack(fill=tk.X)
+        self._apply_render_default()
+        self._update_input_label()
+        self._update_out_dir_label()
+        self._refresh_plan()
+        self._sync_preview()
+
+    def _on_recursive(self):
+        # Folder mode: changes which videos are found. Video-list mode: applies
+        # to the next "Add a folder's videos" or dropped folder.
+        if self.input_mode.get() == "folder":
+            self._refresh_plan()
+            self._sync_preview()
+
+    def _on_render_toggle(self):
+        self._render_touched = True
+
+    def _apply_render_default(self):
+        """Until the user touches it: render only when one video is selected
+        (annotated MP4s are slow; the CLI never renders unless asked)."""
+        if not self._render_touched:
+            self.render_var.set(self.input_mode.get() == "files"
+                                and len(self.video_files) == 1)
+
+    def _update_input_label(self):
+        if self.input_mode.get() == "folder":
+            self._input_lbl.config(text=f"Folder: {self.folder}" if self.folder
+                                   else "No folder chosen")
+        else:
+            n = len(self.video_files)
+            folders = len({str(Path(v).parent) for v in self.video_files})
+            self._input_lbl.config(
+                text=(f"{n} video(s) from {folders} folder(s)" if n
+                      else "No videos yet: add them or drop them here"))
+
+    def _add_paths(self, files: list[str], folders: list[str]) -> tuple[int, list[str]]:
+        """Add video files, and the videos inside folders, to the list."""
+        existing = set(self.video_files)
+        added, rejected = [], []
+        candidates = [Path(f).expanduser().resolve() for f in files]
+        for folder in folders:
+            try:
+                candidates.extend(_videos_from_inputs(folder, None, self.recursive_var.get()))
+            except ValueError:
+                rejected.append(f"{Path(folder).name}/ (no videos)")
+        for path in candidates:
+            if path.is_file() and _is_video_file(path):
+                if str(path) not in existing:
+                    existing.add(str(path))
+                    self.video_files.append(str(path))
+                    added.append(str(path))
+            else:
+                rejected.append(path.name)
+        return len(added), rejected
+
+    def _report_added(self, added: int, rejected: list[str]):
+        msg = f"Added {added} video(s)." if added else "No new videos added."
+        if rejected:
+            shown = ", ".join(rejected[:5]) + (" …" if len(rejected) > 5 else "")
+            msg += f"\nIgnored (not a supported video): {shown}"
+        self._status(msg)
+
+    def _after_list_change(self, added: int = 0):
+        self._apply_render_default()
+        self._update_input_label()
+        self._update_out_dir_label()
+        self._refresh_plan()
+        if added and self.video_files and (
+                not self.video_path or not self._in_plan(self.video_path)):
+            self._open_video(self.video_files[-added])
+        else:
+            self._sync_preview()
+
+    def _add_videos_dialog(self):
+        if self._busy:
+            return
+        exts = " ".join(f"*{e} *{e.upper()}" for e in sorted(OPTIMIZE_VIDEO_EXTENSIONS))
+        paths = filedialog.askopenfilenames(title="Add videos (select several)",
+                                            filetypes=[("Video", exts), ("All", "*.*")])
+        paths = list(self.root.tk.splitlist(paths)) if isinstance(paths, str) else list(paths or [])
+        if not paths:
+            return
+        self.input_mode.set("files")
+        added, rejected = self._add_paths(paths, [])
+        self._on_input_mode_quiet()
+        self._after_list_change(added)
+        self._report_added(added, rejected)
+
+    def _add_folder_dialog(self):
+        if self._busy:
+            return
+        folder = filedialog.askdirectory(title="Add all videos in a folder")
+        if not folder:
+            return
+        self.input_mode.set("files")
+        added, rejected = self._add_paths([], [folder])
+        self._on_input_mode_quiet()
+        self._after_list_change(added)
+        self._report_added(added, rejected)
+
+    def _on_input_mode_quiet(self):
+        """Show the right input buttons without rebuilding the plan."""
+        if self.input_mode.get() == "files":
+            self._folder_box.pack_forget()
+            self._files_box.pack(fill=tk.X)
+
+    def _remove_selected(self):
+        if self._busy or self.input_mode.get() != "files" or self.plan is None:
+            return
+        selected = self.table.selection()
+        if not selected:
+            self._status("Select videos in the table first (Shift/Cmd-click for several).")
+            return
+        remove = {str(self.plan.items[int(iid)].video) for iid in selected}
+        self.video_files = [v for v in self.video_files if v not in remove]
+        self._status(f"Removed {len(remove)} video(s) from the list.")
+        self._after_list_change()
+
+    def _clear_list(self):
+        if self._busy:
+            return
+        self.video_files = []
+        self._status("Video list cleared.")
+        self._after_list_change()
+
+    def _choose_folder_dialog(self):
+        if self._busy:
+            return
+        folder = filedialog.askdirectory(title="Select video folder")
+        if folder:
+            self._set_folder(folder)
+
+    def _set_folder(self, folder: str):
+        self.input_mode.set("folder")
+        self.folder = str(Path(folder).expanduser().resolve())
+        self._on_input_mode()
+        if self.plan:
+            self._status(f"Folder: {self.plan.summary_line()}")
+
+    def _sync_preview(self):
+        """Keep the preview on a video that belongs to the current input."""
+        if self.plan and self.plan.items:
+            if not self.video_path or not self._in_plan(self.video_path):
+                self._open_video(str(self.plan.items[0].video))
+        elif self.video_path:
+            self._close_preview()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Preview video and circle handling
+    # ══════════════════════════════════════════════════════════════════════
     def load_video(self, path: str):
         if not os.path.exists(path):
             messagebox.showerror("File not found", f"Cannot find:\n{path}")
             return
-        self._open_video(path)
+        self.handle_dropped_paths([path])
 
-    # Opens the system file selector to choose the input video.
-    def browse_video(self):
-        p = filedialog.askopenfilename(
-            title="Select video",
-            filetypes=[("Video", "*.mp4 *.MP4 *.mov *.MOV *.avi *.AVI"),
-                       ("All", "*.*")])
-        if p:
-            self._open_video(p)
-
-    # Opens a video, reads its metadata, resets circle, and renders first frame.
-    def _open_video(self, path: str):
+    def _close_preview(self):
         if self.cap:
             self.cap.release()
+        self.cap = None
+        self.video_path = None
+        self.current_bgr = None
+        self._suspend_circle_hook = True
+        try:
+            self.clear_circle()
+        finally:
+            self._suspend_circle_hook = False
+        self.canvas.delete("all")
+        self._info_lbl.config(text="")
+        self._frame_lbl.config(text="—")
+
+    def _open_video(self, path: str) -> bool:
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
             messagebox.showerror("Error", f"Cannot open:\n{path}")
-            return
-        self.cap        = cap
+            return False
+        if self.cap:
+            self.cap.release()
+        self.cap = cap
         self.video_path = path
-        self.fps        = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        self.fps = fps if math.isfinite(fps) and fps > 0 else 30.0
         self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.orig_w     = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.orig_h     = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
+        self.orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self._slider.config(to=max(0, self.total_frames - 1))
         self._frame_var.set(0)
-        self.clear_circle()
-        self._show_frame(0)
 
+        # Show this video's own circle (clicked, or found as a file).
+        self._suspend_circle_hook = True
+        try:
+            self.clear_circle()
+        finally:
+            self._suspend_circle_hook = False
+        self._autoload_circle(Path(path))
+        self._show_frame(0)
         dur = self.total_frames / self.fps
         self._info_lbl.config(
-            text=f"{os.path.basename(path)}\n"
+            text=f"Preview: {os.path.basename(path)}\n"
                  f"{self.orig_w}×{self.orig_h}  {self.fps:.0f} fps\n"
                  f"{self.total_frames:,} frames  ({dur:.0f} s)")
-        self._status("Video loaded.\n\n"
-                     "  ANTS FOR LIFE,\n"
-                     ".\n"
-                     ".")
+        self._refresh_proc_btn()
+        return True
+
+    def _manual(self) -> bool:
+        return self.circle_mode.get() == "manual"
+
+    def _autoload_circle(self, video: Path):
+        """Show the circle this video will use in the current circle mode."""
+        if self._manual():
+            entry = self.video_circles.get(str(video.resolve()))
+            if entry is None:
+                self._circle_lbl.config(text="Not clicked yet: click the center, then north",
+                                        fg="#b00")
+                return
+            circle, path = entry
+            self._apply_circle_params(circle)
+            self.circle_source_path = path
+            self._circle_lbl.config(
+                text=(f"Clicked circle (saved as {Path(path).name})" if path
+                      else "Clicked circle (used when you process)"),
+                fg="#006600")
+            return
+        lookup = _batch_circle(video, self._output_dir_for(video))
+        if lookup.status == "ok":
+            self._apply_circle_params(lookup.circle)
+            self.circle_source_path = str(lookup.path)
+            self._circle_lbl.config(text=f"Found in {lookup.source}:\n{lookup.path.name}",
+                                    fg="#006600")
+        elif lookup.status == "invalid":
+            self._circle_lbl.config(text=f"Circle file invalid: {lookup.reason}", fg="#b00")
+        else:
+            self._circle_lbl.config(
+                text=f"No {video.stem}_circle.json in the input or output folder",
+                fg="#b00")
+
+    def _show_circle_file(self, path: str, label: str):
+        circle, reason = _read_circle_file(Path(path))
+        if circle is None:
+            self._circle_lbl.config(text=f"Circle file invalid: {reason}", fg="#b00")
+            return
+        self._apply_circle_params(circle)
+        self.circle_source_path = str(path)
+        self._circle_lbl.config(text=f"Circle loaded ({label}):\n{Path(path).name}",
+                                fg="#006600")
+
+    def _remember_preview_circle(self, path: str | None):
+        """Record the preview circle as this video's own circle (per-video mode)."""
+        if not self._manual() or not self.video_path:
+            return
+        key = str(Path(self.video_path).resolve())
+        if self.circle_complete:
+            self.video_circles[key] = (self._preview_circle(), path)
+        else:
+            self.video_circles.pop(key, None)
+
+    def _circle_edited(self):
+        """Called by CirclePreviewMixin after a click, clear or radius change."""
+        if self._suspend_circle_hook:
+            return
+        self.circle_source_path = None
+        self._remember_preview_circle(None)
+        if not self._manual() and self.circle_complete:
+            # Find-files mode only uses circles saved as files.
+            self._circle_lbl.config(
+                text="Not used until saved: click Save circle… (keep the suggested "
+                     "<name>_circle.json next to the video)", fg="#8a5a00")
+        self._refresh_plan()
+
+    def _preview_circle(self) -> dict | None:
+        if not self.circle_complete:
+            return None
+        return _circle_params_dict(self.circle_center, float(self.circle_radius),
+                                   self.north_point)
+
+    def _save_circle(self):
+        if not self.circle_complete:
+            messagebox.showwarning("Circle", "Define the center and north first.")
+            return
+        video = Path(self.video_path) if self.video_path else None
+        path = filedialog.asksaveasfilename(
+            title="Save circle parameters",
+            initialdir=str(video.parent) if video else None,
+            initialfile=f"{video.stem}_circle.json" if video else "circle.json",
+            defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        try:
+            _save_circle_json(self._preview_circle(), path)
+        except OSError as exc:
+            messagebox.showerror("Save failed", str(exc))
+            return
+        self.circle_source_path = path
+        self._remember_preview_circle(path)
+        self._circle_lbl.config(text=f"Circle saved:\n{Path(path).name}", fg="#006600")
+        self._refresh_plan()
+        message = f"Saved circle to:\n{path}"
+        if not self._manual() and video is not None:
+            name = f"{video.stem}_circle.json"
+            spots = {(video.parent / name).resolve()}
+            out = self._output_dir_for(video)
+            if out:
+                spots.add((out / name).resolve())
+            if Path(path).resolve() not in spots:
+                message += (f"\n\nNote: it is not named {name} in the video or output "
+                            "folder, so it won't be found automatically.")
+        self._status(message)
+
+    def _on_circle_mode(self):
+        if self._manual():
+            self._circle_mode_lbl.config(
+                text="Double-click each video in the table and click its circle. "
+                     "Circle files on disk are ignored.")
+        else:
+            self._circle_mode_lbl.config(
+                text="Looks next to each video first, then in the output folder.")
+        self._refresh_plan()
+        if self.video_path:
+            # Show the circle this video uses in the new mode.
+            self._suspend_circle_hook = True
+            try:
+                self.clear_circle()
+            finally:
+                self._suspend_circle_hook = False
+            self._autoload_circle(Path(self.video_path))
+            self._refresh_proc_btn()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Parameters
+    # ══════════════════════════════════════════════════════════════════════
+    def _set_parameters_from_file(self, path: str, show_errors: bool = True) -> bool:
+        try:
+            values = load_tune_values(path)
+            if not values:
+                raise ValueError("No recognized numeric parameters in the file.")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            if show_errors:
+                messagebox.showerror("Parameters", f"Could not load {path}:\n\n{exc}")
+            return False
+        self.parameter_values = {**DEFAULT_PARAMETERS, **values}
+        self.parameters_file = str(Path(path).expanduser().resolve())
+        self._params_lbl.config(text=f"{Path(path).name}  ({len(values)} values)\n{self.parameters_file}")
+        return True
+
+    def _load_parameters(self):
+        path = filedialog.askopenfilename(title="Load parameter preset",
+                                          filetypes=[("JSON", "*.json"), ("All", "*.*")])
+        if path and self._set_parameters_from_file(path):
+            self._status("Parameters loaded; they apply when you click Process.")
+
+    def _reset_parameters(self):
+        self.parameter_values = dict(DEFAULT_PARAMETERS)
+        self.parameters_file = None
+        self._params_lbl.config(text="Defaults (built-in values)")
+        self._status("Parameters reset to the built-in defaults.")
+
+    def _view_parameters(self):
+        win = tk.Toplevel(self.root)
+        win.title("Parameter values")
+        source = self.parameters_file or "built-in defaults"
+        text = tk.Text(win, width=64, height=min(32, len(self.parameter_values) + 4),
+                       font=("Courier", 10))
+        text.pack(fill=tk.BOTH, expand=True)
+        text.insert(tk.END, f"Source: {source}\n* = differs from the default\n\n")
+        for key in sorted(self.parameter_values):
+            value = self.parameter_values[key]
+            default = DEFAULT_PARAMETERS.get(key)
+            mark = "*" if value != default else " "
+            suffix = f"   (default {default})" if value != default else ""
+            text.insert(tk.END, f"{mark} {key:<26} {value}{suffix}\n")
+        text.config(state=tk.DISABLED)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Output folder
+    # ══════════════════════════════════════════════════════════════════════
+    def _default_output(self) -> Path | None:
+        if self.input_mode.get() == "folder":
+            return default_output_root(self.folder, None) if self.folder else None
+        return default_output_root(None, ["x"])
+
+    def _output_root(self) -> Path | None:
+        return Path(self.out_dir).resolve() if self.out_dir else self._default_output()
+
+    def _output_dir_for(self, video: Path) -> Path | None:
+        """This video's own output folder (mirrored subfolder for folder runs)."""
+        if self.plan is not None:
+            for item in self.plan.items:
+                if item.video == video.resolve():
+                    return item.output_dir
+        return self._output_root()
+
+    def _select_out_dir(self):
+        path = filedialog.askdirectory(title="Select output folder")
+        if not path:
+            return
+        self.out_dir = path
+        self._update_out_dir_label()
+        self._refresh_plan()
+
+    def _clear_out_dir(self):
+        self.out_dir = None
+        self._update_out_dir_label()
+        self._refresh_plan()
+
+    def _update_out_dir_label(self):
+        if self.out_dir:
+            self._out_dir_lbl.config(text=f"Output folder: {self.out_dir}")
+            return
+        default = self._default_output()
+        where = str(default) if default else "<folder>/batch_results"
+        self._out_dir_lbl.config(text=f"Output folder (default): {where}")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Batch plan (pre-run check) and the video table
+    # ══════════════════════════════════════════════════════════════════════
+    def _build_plan(self) -> BatchPlan | None:
+        """Build the same plan the CLI would, then apply the GUI circle mode."""
+        if self.input_mode.get() == "files":
+            if not self.video_files:
+                return None
+            plan = plan_batch(video_file=list(self.video_files), output_dir=self.out_dir)
+        else:
+            if not self.folder:
+                return None
+            plan = plan_batch(videos_dir=self.folder, recursive=self.recursive_var.get(),
+                              output_dir=self.out_dir)
+        if self._manual():
+            # Only circles clicked in the GUI count; files on disk are ignored.
+            for item in plan.items:
+                entry = self.video_circles.get(str(item.video))
+                if entry is None:
+                    item.circle = CircleLookup(
+                        "missing", reason="not clicked yet (double-click the row, then "
+                                          "click the center and north)")
+                else:
+                    circle, path = entry
+                    item.circle = CircleLookup(
+                        "ok", circle, Path(path) if path else None,
+                        self.CLICKED if path else self.CLICKED_UNSAVED)
+        return plan
+
+    def _refresh_plan(self):
+        if self._busy:
+            return
+        try:
+            self.plan = self._build_plan()
+            self._plan_error = ""
+        except ValueError as exc:
+            self.plan = None
+            self._plan_error = str(exc)
+        self._fill_table()
         self._refresh_proc_btn()
 
-    # Enables Process button only if both video and circle are available.
-    def _refresh_proc_btn(self):
-        ok = bool(self.cap and self.circle_complete)
-        self._proc_btn.config(state=tk.NORMAL if ok else tk.DISABLED)
+    def _in_plan(self, path: str) -> bool:
+        return bool(self.plan) and any(item.video == Path(path).resolve()
+                                       for item in self.plan.items)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # Processing
-    # ══════════════════════════════════════════════════════════════════════════
+    def _row_values(self, item: BatchItem) -> tuple[tuple, str]:
+        if item.status == "pending":
+            tag = item.state
+            if tag == "ready":
+                where = item.circle.path if item.circle.path else ""
+                details = f"{item.circle.source}: {where}".rstrip(": ")
+            else:
+                details = item.reason
+        else:
+            tag = item.status
+            details = item.message
+        return (tag, details), tag
 
-    # Bundles circle calibration, starts VideoProcessor in a daemon thread,
-    # and disables conflicting UI buttons.
-    def start_processing(self):
-        if not (self.cap and self.circle_complete):
+    def _fill_table(self):
+        self.table.delete(*self.table.get_children())
+        self._iid_by_item.clear()
+        if self.plan is None:
+            empty = ("Add videos or drop them here" if self.input_mode.get() == "files"
+                     else "Choose a folder of videos")
+            self._plan_lbl.config(text=self._plan_error or empty)
             return
+        for index, item in enumerate(self.plan.items):
+            iid = str(index)
+            values, tag = self._row_values(item)
+            # Folder mode: path inside the folder. Video list: path relative to
+            # the folders' common parent (just the name when all share one).
+            self.table.insert("", tk.END, iid=iid, text=item.relative,
+                              values=values, tags=(tag,))
+            self._iid_by_item[id(item)] = iid
+        c = self.plan.counts()
+        self._plan_lbl.config(
+            text=f"{c['total']} videos · {c['ready']} ready · {c['missing']} missing · "
+                 f"{c['invalid']} invalid   →   output: {self.plan.output_root}")
+
+    def _update_row(self, item: BatchItem):
+        iid = self._iid_by_item.get(id(item))
+        if iid is None or not self.table.exists(iid):
+            return
+        values, tag = self._row_values(item)
+        self.table.item(iid, values=values, tags=(tag,))
+        if item.status == "running":
+            self.table.see(iid)
+
+    def _on_table_double(self, event):
+        if self._busy:
+            return
+        iid = self.table.identify_row(event.y) or self.table.focus()
+        if not iid or self.plan is None:
+            return
+        item = self.plan.items[int(iid)]
+        if self._open_video(str(item.video)):
+            if item.state == "ready":
+                self._status(f"Previewing {item.relative}.")
+            else:
+                if self._manual():
+                    hint = "Click the center, then north. It's used when you process."
+                else:
+                    hint = ("Click the center, then north, then Save circle… (keep the "
+                            "suggested <name>_circle.json) so it is found.")
+                self._status(f"Previewing {item.relative} ({item.reason}).\n{hint}")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Processing
+    # ══════════════════════════════════════════════════════════════════════
+    def _can_process(self) -> tuple[bool, str]:
+        if self.plan is None:
+            if self._plan_error:
+                return False, self._plan_error
+            return False, ("Add videos or drop them here." if self.input_mode.get() == "files"
+                           else "Choose a folder.")
+        c = self.plan.counts()
+        problems = c["missing"] + c["invalid"]
+        if c["ready"] == 0:
+            if c["total"] == 1:
+                return False, "Draw or load a circle (center, then north)."
+            return False, "No video has a valid circle yet."
+        if problems and self.strict_var.get():
+            return False, f"Strict: fix {problems} missing/invalid circle(s) first."
+        if problems:
+            return True, f"{problems} video(s) without a valid circle will be skipped."
+        return True, ""
+
+    def _refresh_proc_btn(self):
+        if not hasattr(self, "_proc_btn"):
+            return
+        regression = getattr(self, "regression", None)
+        if self._busy or (regression is not None and regression._busy):
+            self._proc_btn.config(state=tk.DISABLED)
+            return
+        ok, hint = self._can_process()
+        self._proc_btn.config(state=tk.NORMAL if ok else tk.DISABLED)
+        self._proc_hint.config(text=hint)
+
+    def start_processing(self):
+        if self._busy:
+            return
+        if self.regression._busy:
+            messagebox.showwarning("Busy", "The Regression tab is running; wait for it to finish.")
+            return
+        self._refresh_plan()
+        ok, hint = self._can_process()
+        if not ok:
+            messagebox.showwarning("Cannot process yet", hint)
+            return
+        plan = self.plan
+        strict = self.strict_var.get()
+        render = self.render_var.get()
+        code_version = self.ask_code_version()
+        if code_version is None:
+            self._status("Run cancelled (no code version given).")
+            return
+        # Parameters apply at the START of a run: defaults first, then the preset.
+        apply_tune_values(DEFAULT_PARAMETERS)
+        apply_tune_values(self.parameter_values)
+
+        runnable = [item for item in plan.items if item.state == "ready"]
+        self._run_order = {id(item): (k, len(runnable)) for k, item in enumerate(runnable, 1)}
+        self._busy = True
+        self._cancel_event = threading.Event()
         self._proc_btn.config(state=tk.DISABLED)
         self._cancel_btn.config(state=tk.NORMAL)
         self._prog_var.set(0)
         self._prog_lbl.config(text="Starting…")
+        self._overall_lbl.config(text=f"0/{len(runnable)} videos")
+        self._status("Processing…")
+        threading.Thread(target=self._thread_body,
+                         args=(plan, strict, render, self.parameters_file, code_version),
+                         daemon=True).start()
 
-        # Create circle parameters dict
-        north_angle = angle_deg_from_center_to_point(
-            self.circle_center[0], self.circle_center[1],
-            self.north_point[0], self.north_point[1])
-        circle_params = {
-            'center': self.circle_center,
-            'radius': self.circle_radius,
-            'north_angle': north_angle
-        }
-
-        self.processor = VideoProcessor(
-            self.video_path, circle_params,
-            self._on_progress, self._status,
-            self.out_dir, None
-        )
-        threading.Thread(target=self._thread_body, daemon=True).start()
-
-    # Runs processing outside the UI thread and schedules UI completion/error
-    # updates using Tkinter root.after().
-    def _thread_body(self):
+    def _thread_body(self, plan, strict, render, parameters_file, code_version=None):
         try:
-            events, enter_totals, exit_totals, paths = self.processor.run()
-            if events is None:
-                self._status("Cancelled.")
-                self.root.after(0, self._reset_btns)
-                return
-
-            
-            msg_lines = ["Done!\n"]
-            # for quad, count in enter_totals.items():
-            #     msg_lines.append(f"{quad}: {count:+d}")
-            msg_lines.extend([f"\nTotal events: {len(events)}", 
-                             f"Saved to:\n{paths['output_dir']}"])
-            
-            msg = "\n".join(msg_lines)
-            self._status(msg)
-            self.root.after(0, lambda: self._prog_var.set(100))
-            self.root.after(0, lambda: self._prog_lbl.config(text="Complete!"))
-        except Exception as exc:
+            summary = execute_batch(
+                plan, strict=strict, render_video=render, parameters_file=parameters_file,
+                progress_cb=self._on_batch_progress, video_cb=self._on_item_changed,
+                log_cb=lambda m: print(m, flush=True), cancel_event=self._cancel_event,
+                code_version=code_version, interface='gui')
+            self._ui(lambda s=summary: self._finish_run(s, None))
+        except BatchAbort as exc:
+            message, summary = str(exc), exc.summary
+            self._ui(lambda s=summary, m=message: self._finish_run(s, m))
+        except Exception as exc:  # show unexpected errors instead of dying silently
             import traceback
-            self._status(f"⚠ Error: {type(exc)}\n{str(exc)}\n\n{traceback.format_exc()[:400]}")
-            raise
-        finally:
-            self.root.after(0, self._reset_btns)
+            message = f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()[-600:]}"
+            self._ui(lambda m=message: self._finish_run(None, m))
 
-    # Forwards cancellation request to active VideoProcessor.
-    def cancel_processing(self):
-        if self.processor:
-            self.processor.cancel()
+    def _on_batch_progress(self, index, total, pct, msg):
+        def update():
+            self._prog_var.set(pct)
+            if msg and msg != "done":
+                self._prog_lbl.config(text=msg)
+        self._ui(update)
 
-    # Restores appropriate button states after processing.
-    def _reset_btns(self):
-        ok = bool(self.cap and self.circle_complete)
-        self._proc_btn.config(state=tk.NORMAL if ok else tk.DISABLED)
+    def _on_item_changed(self, item):
+        def update(it=item):
+            self._update_row(it)
+            if it.status == "running":
+                k, n = self._run_order.get(id(it), (0, 0))
+                self._overall_lbl.config(text=f"Video {k}/{n}: {it.relative}")
+                self._prog_var.set(0)
+        self._ui(update)
+
+    def _finish_run(self, summary: dict | None, error: str | None):
+        self._busy = False
+        self._cancel_event = None
         self._cancel_btn.config(state=tk.DISABLED)
+        lines = []
+        if summary:
+            state = "Cancelled" if summary["cancelled"] else ("Stopped" if error else "Done")
+            lines.append(f"{state}: {summary['videos_processed']} processed · "
+                         f"{summary['videos_skipped']} skipped · "
+                         f"{summary['videos_failed']} failed")
+            entries, exits = summary["totals"]["entries"], summary["totals"]["exits"]
+            lines.append("  ".join(f"{q} in:{entries[q]} out:{exits[q]}" for q in _QUADRANTS))
+            lines.append(f"Saved to:\n{summary['output']}")
+            lines.append(f"Metadata: run_metadata.json (code version {summary['code_version']})")
+            if not error and not summary["cancelled"]:
+                self._prog_var.set(100)
+            self._overall_lbl.config(text=lines[0])
+        self._prog_lbl.config(text="Complete!" if summary and not error else "")
+        if error:
+            lines.append(error.splitlines()[0])
+            messagebox.showerror("Processing stopped", error)
+        self._status("\n".join(lines))
+        self._refresh_proc_btn()
+        self.regression._refresh_btn()
 
-    # Schedules UI-safe progress label and percent updates.
-    def _on_progress(self, val: float, msg: str = ""):
-        self.root.after(0, lambda: self._prog_var.set(val))
-        if msg:
-            self.root.after(0, lambda: self._prog_lbl.config(text=msg))
+    def cancel_processing(self):
+        if self._cancel_event is not None:
+            self._cancel_event.set()
+            self._status("Cancelling… (finishing the current frame)")
 
-    # Schedules UI-safe status-message updates.
-    def _status(self, msg: str):
-        self.root.after(0, lambda: self._status_lbl.config(text=msg))
+    # ══════════════════════════════════════════════════════════════════════
+    # Equivalent CLI command
+    # ══════════════════════════════════════════════════════════════════════
+    def _copy_cli_command(self):
+        files_mode = self.input_mode.get() == "files"
+        if self.plan is None:
+            messagebox.showinfo("Copy CLI command",
+                                "Add videos first." if files_mode else "Choose a folder first.")
+            return
+        opts = {"parameters": self.parameters_file, "output": self.out_dir,
+                "render_video": self.render_var.get(), "strict": self.strict_var.get(),
+                "code_version": self.code_version}
+        if files_mode:
+            opts["video"] = list(self.video_files)
+        else:
+            opts.update(videos=self.folder, recursive=self.recursive_var.get())
+        if self._manual():
+            self._offer_to_save_gui_circles()
+        command = build_command_line("run", **opts)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(command)
+        print(command, flush=True)
+        self._status(f"Copied to clipboard:\n{command}")
 
-    # ══════════════════════════════════════════════════════════════════════════
+    def _cli_findable(self, item: BatchItem, path: Path | None) -> bool:
+        """Would the CLI's circle lookup find this exact file for this video?"""
+        if path is None:
+            return False
+        name = f"{item.video.stem}_circle.json"
+        spots = {(item.video.parent / name).resolve(), (item.output_dir / name).resolve()}
+        return path.resolve() in spots
+
+    def _offer_to_save_gui_circles(self):
+        """Circles clicked in the GUI are invisible to the CLI (which finds
+        <name>_circle.json files); offer to save them next to each video."""
+        pending = [item for item in self.plan.items
+                   if item.circle.source in (self.CLICKED, self.CLICKED_UNSAVED)
+                   and not self._cli_findable(item, item.circle.path)]
+        if not pending:
+            return
+        names = ", ".join(item.video.name for item in pending[:4]) + \
+            (" …" if len(pending) > 4 else "")
+        if not messagebox.askyesno(
+                "Copy CLI command",
+                f"{len(pending)} circle(s) clicked in the GUI aren't saved where the "
+                f"command looks ({names}).\n\nSave them as <name>_circle.json next to "
+                "each video now? (An existing file with that name is replaced.)\n\n"
+                "If you choose No, the command will skip those videos."):
+            return
+        saved = 0
+        for item in pending:
+            target = item.video.parent / f"{item.video.stem}_circle.json"
+            try:
+                _save_circle_json(item.circle.circle, str(target))
+            except OSError as exc:
+                messagebox.showerror("Save failed", f"{target}\n\n{exc}")
+                continue
+            self.video_circles[str(item.video)] = (item.circle.circle, str(target))
+            saved += 1
+        if self.video_path and str(Path(self.video_path).resolve()) in self.video_circles:
+            self.circle_source_path = self.video_circles[str(Path(self.video_path).resolve())][1]
+        self._refresh_plan()
+        self._status(f"Saved {saved} circle file(s) next to their videos.")
+
+    def ask_code_version(self) -> str | None:
+        """Ask which GitHub version of the code this run uses (for the run
+        metadata). Pre-filled with the last answer or the version detected
+        from git. Returns None if the user cancels (the run is not started)."""
+        detected = detect_code_version()
+        answer = simpledialog.askstring(
+            "Code version",
+            "GitHub version of the code for this run\n(commit, tag or release).\n"
+            "It is saved in the run's metadata file."
+            + (f"\n\nDetected from git: {detected}" if detected else ""),
+            initialvalue=self.code_version or detected, parent=self.root)
+        if answer is None:
+            return None
+        self.code_version = answer.strip() or detected or "not provided"
+        return self.code_version
+
+    # ══════════════════════════════════════════════════════════════════════
+    def _on_close(self):
+        busy = self._busy or self.regression._busy
+        if busy and not messagebox.askyesno(
+                "Quit", "Processing is running. Cancel it and quit?"):
+            return
+        for event in (self._cancel_event, self.regression._cancel_event):
+            if event is not None:
+                event.set()
+        self.root.destroy()
 
     # Starts Tkinter event loop and releases the preview capture on exit.
     def run(self):
@@ -2079,6 +3071,616 @@ class App(CirclePreviewMixin):
         if self.cap:
             self.cap.release()
 
+
+
+# GUI tab for --regression: choose hand counts + videos, check matches and
+# circles, run, then see the fit statistics, plot and per-video errors.
+# Uses plan_regression()/run_regression_mode(), exactly what the CLI runs.
+class RegressionTab:
+    ROW_COLORS = App.ROW_COLORS
+
+    def __init__(self, parent, app: "App"):
+        self.app = app
+        self.root = app.root
+        self.ground_truth: str | None = None
+        self.videos_dir: str | None = None
+        self.parameters_file: str | None = None
+        self.parameter_values: dict = dict(DEFAULT_PARAMETERS)
+        self.circle_file: str | None = None
+        self.out_dir: str | None = None
+        self.plan: dict | None = None
+        self._plan_error = ""
+        self._runnable: list[dict] = []
+        self._busy = False
+        self._cancel_event: threading.Event | None = None
+        self._plot_photo = None
+        self._last_summary: dict | None = None
+        self._build(parent)
+        self._refresh_plan()
+
+    # ── layout ───────────────────────────────────────────────────────────
+    def _build(self, parent):
+        self.quadrant_var = tk.StringVar(value="All")
+        self.render_var = tk.BooleanVar(value=False)
+        self.skip_var = tk.BooleanVar(value=False)
+        note = App._note
+        panel = App._panel
+
+        pane = tk.PanedWindow(parent, orient=tk.HORIZONTAL, sashwidth=6,
+                              sashrelief=tk.RAISED, bg="#333")
+        pane.pack(fill=tk.BOTH, expand=True)
+        side = tk.Frame(pane, bg="#f4f4f4", padx=8, pady=6)
+        pane.add(side, minsize=300, width=330)
+
+        tk.Label(side, text="📈  Regression", font=("Arial", 15, "bold"),
+                 bg="#f4f4f4").pack(pady=(2, 6))
+        tk.Label(side, text="Compare the tracker's counts with hand counts.",
+                 font=("Arial", 8), bg="#f4f4f4", fg="#555").pack(anchor=tk.W)
+
+        box = panel(side, "Hand counts (ground truth)")
+        self._gt_lbl = note(box, "Not chosen")
+        row = tk.Frame(box)
+        row.pack(fill=tk.X, padx=4, pady=(0, 4))
+        tk.Button(row, text="Choose CSV…", command=self._choose_gt_csv).pack(
+            side=tk.LEFT, expand=True, fill=tk.X)
+        tk.Button(row, text="Choose folder…", command=self._choose_gt_folder).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        box = panel(side, "Videos")
+        self._vid_lbl = note(box, "Not chosen")
+        tk.Button(box, text="Choose video folder…", command=self._choose_videos).pack(
+            fill=tk.X, padx=4, pady=(0, 4))
+        self._drop_lbl = tk.Label(box, text="", relief=tk.GROOVE, bd=2, height=2,
+                                  font=("Arial", 8), fg="#555", bg="#fafafa", wraplength=260)
+        self._drop_lbl.pack(fill=tk.X, padx=4, pady=(0, 4))
+
+        box = panel(side, "Parameters")
+        self._params_lbl = note(box, "Defaults (built-in values)")
+        row = tk.Frame(box)
+        row.pack(fill=tk.X, padx=4, pady=(0, 4))
+        tk.Button(row, text="Load…", command=self._load_parameters).pack(
+            side=tk.LEFT, expand=True, fill=tk.X)
+        tk.Button(row, text="Reset", command=self._reset_parameters).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        box = panel(side, "Circles")
+        tk.Label(box, text=("Each video uses <name>_circle.json next to the video,\n"
+                            "in the hand-counts folder, or in <videos>/circles/."),
+                 font=("Arial", 8), justify=tk.LEFT, fg="#444").pack(anchor=tk.W, padx=4)
+        self._circle_lbl = note(box, "Optional: one circle file for every video")
+        row = tk.Frame(box)
+        row.pack(fill=tk.X, padx=4, pady=(0, 2))
+        tk.Button(row, text="Circle file for all…", command=self._choose_circle).pack(
+            side=tk.LEFT, expand=True, fill=tk.X)
+        tk.Button(row, text="Clear", command=self._clear_circle).pack(side=tk.LEFT, padx=(2, 0))
+        ttk.Checkbutton(box, text="Skip videos without a circle\n(--skip-missing-circles)",
+                        variable=self.skip_var,
+                        command=self._refresh_btn).pack(anchor=tk.W, padx=4, pady=(0, 4))
+
+        box = panel(side, "Options")
+        row = tk.Frame(box)
+        row.pack(fill=tk.X, padx=4, pady=2)
+        tk.Label(row, text="Quadrant:", font=("Arial", 8)).pack(side=tk.LEFT)
+        combo = ttk.Combobox(row, textvariable=self.quadrant_var, width=6, state="readonly",
+                             values=["All", *_QUADRANTS])
+        combo.pack(side=tk.LEFT, padx=4)
+        combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_plan())
+        ttk.Checkbutton(box, text="Render annotated MP4 (--render-video)",
+                        variable=self.render_var).pack(anchor=tk.W, padx=4)
+        self._out_lbl = note(box, "")
+        row = tk.Frame(box)
+        row.pack(fill=tk.X, padx=4, pady=(0, 4))
+        tk.Button(row, text="Select output folder…", command=self._select_out).pack(
+            side=tk.LEFT, expand=True, fill=tk.X)
+        tk.Button(row, text="Use default", command=self._clear_out).pack(side=tk.LEFT, padx=(2, 0))
+
+        box = panel(side, "Run")
+        self._run_btn = tk.Button(box, text="▶  Run regression", font=("Arial", 11, "bold"),
+                                  bg="#1565c0", fg="white", state=tk.DISABLED,
+                                  activebackground="#0d47a1", activeforeground="white",
+                                  command=self.start)
+        self._run_btn.pack(fill=tk.X, padx=4, pady=(4, 0))
+        self._hint = tk.Label(box, text="", font=("Arial", 8), fg="#8a5a00",
+                              wraplength=270, justify=tk.LEFT)
+        self._hint.pack(anchor=tk.W, padx=4)
+        self._cancel_btn = tk.Button(box, text="Cancel", state=tk.DISABLED, command=self.cancel)
+        self._cancel_btn.pack(fill=tk.X, padx=4, pady=2)
+        self._overall_lbl = tk.Label(box, text="", font=("Arial", 9, "bold"),
+                                     wraplength=270, justify=tk.LEFT)
+        self._overall_lbl.pack(anchor=tk.W, padx=4)
+        self._prog_var = tk.DoubleVar()
+        ttk.Progressbar(box, variable=self._prog_var, maximum=100).pack(fill=tk.X, padx=4, pady=2)
+        self._prog_lbl = tk.Label(box, text="", font=("Arial", 8), wraplength=270, justify=tk.LEFT)
+        self._prog_lbl.pack(anchor=tk.W, padx=4)
+        row = tk.Frame(box)
+        row.pack(fill=tk.X, padx=4, pady=4)
+        tk.Button(row, text="Copy CLI command", command=self._copy_command).pack(
+            side=tk.LEFT, expand=True, fill=tk.X)
+        tk.Button(row, text="Open output folder", command=self._open_output).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        self._status_lbl = tk.Label(side, text="Choose the hand counts and the video folder.",
+                                    wraplength=290, justify=tk.LEFT, font=("Arial", 9),
+                                    bg="#f4f4f4", fg="#333")
+        self._status_lbl.pack(anchor=tk.W, pady=6)
+
+        right = tk.PanedWindow(pane, orient=tk.VERTICAL, sashwidth=6,
+                               sashrelief=tk.RAISED, bg="#333")
+        pane.add(right, minsize=500)
+        top = tk.Frame(right)
+        right.add(top, minsize=180, height=300)
+        head = tk.Frame(top)
+        head.pack(fill=tk.X, padx=4, pady=2)
+        self._plan_lbl = tk.Label(head, text="", font=("Arial", 9, "bold"), anchor=tk.W,
+                                  justify=tk.LEFT, wraplength=900)
+        self._plan_lbl.pack(side=tk.LEFT)
+        tk.Button(head, text="Refresh", command=self._refresh_plan).pack(side=tk.RIGHT)
+        body = tk.Frame(top)
+        body.pack(fill=tk.BOTH, expand=True)
+        self.table = ttk.Treeview(body, columns=("title", "status", "details"),
+                                  show="tree headings", selectmode="browse")
+        for col, text, width in (("#0", "Video", 230), ("title", "Hand-count title", 150),
+                                 ("status", "Status", 90), ("details", "Circle / result", 560)):
+            self.table.heading(col, text=text)
+            self.table.column(col, width=width, stretch=(col == "details"))
+        for tag, colour in self.ROW_COLORS.items():
+            self.table.tag_configure(tag, foreground=colour)
+        self.table.tag_configure("unmatched", foreground="#757575")
+        bar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self.table.yview)
+        self.table.configure(yscrollcommand=bar.set)
+        bar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        results = tk.Frame(right, bg="white")
+        right.add(results, minsize=200)
+        self._stats = tk.Text(results, width=36, font=("Courier", 10), relief=tk.FLAT,
+                              bg="white", wrap=tk.WORD)
+        self._stats.pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=6)
+        self._stats.insert(tk.END, "Results appear here after a run.")
+        self._stats.config(state=tk.DISABLED)
+        self._plot_lbl = tk.Label(results, bg="white")
+        self._plot_lbl.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._plot_lbl.bind("<Configure>", lambda e: self._show_plot())
+        self._update_out_label()
+
+    def register_drop_targets(self, enabled: bool):
+        if enabled:
+            try:
+                for widget in (self._drop_lbl, self.table):
+                    widget.drop_target_register(DND_FILES)
+                    widget.dnd_bind("<<Drop>>", self._on_drop)
+            except Exception:
+                enabled = False
+        self._drop_lbl.config(
+            text=("⬇  Drop the hand-count CSV and/or the video folder here" if enabled
+                  else "Drag & drop is off (pip install tkinterdnd2)"))
+
+    def _on_drop(self, event):
+        try:
+            paths = list(self.root.tk.splitlist(event.data))
+        except Exception:
+            paths = [event.data]
+        self.handle_dropped_paths(paths)
+        return getattr(event, "action", None)
+
+    def handle_dropped_paths(self, paths: list[str]):
+        """A .csv becomes the hand counts; a folder with videos becomes the
+        video folder; a folder with only CSVs becomes the hand-count folder."""
+        if self._busy:
+            return
+        notes = []
+        for raw in paths:
+            path = Path(raw).expanduser().resolve()
+            if path.is_file() and path.suffix.lower() == ".csv":
+                self.ground_truth = str(path)
+                notes.append(f"hand counts: {path.name}")
+            elif path.is_dir():
+                has_videos = any(p.is_file() and _is_video_file(p) for p in path.iterdir())
+                has_csv = any(p.is_file() and p.suffix.lower() == ".csv" for p in path.iterdir())
+                if has_videos:
+                    self.videos_dir = str(path)
+                    notes.append(f"videos: {path.name}/")
+                elif has_csv:
+                    self.ground_truth = str(path)
+                    notes.append(f"hand-count folder: {path.name}/")
+                else:
+                    notes.append(f"ignored {path.name}/ (no videos or CSVs)")
+            else:
+                notes.append(f"ignored {path.name}")
+        self._update_labels()
+        self._refresh_plan()
+        self._status("Dropped → " + "; ".join(notes))
+
+    # ── helpers ──────────────────────────────────────────────────────────
+    def _ui(self, fn):
+        self.root.after(0, fn)
+
+    def _status(self, msg: str):
+        self._ui(lambda m=msg: self._status_lbl.config(text=m))
+
+    def _quadrant(self) -> str | None:
+        value = self.quadrant_var.get()
+        return None if value in ("", "All") else value
+
+    def _default_output(self) -> Path | None:
+        return Path(self.videos_dir) / "regression_results" if self.videos_dir else None
+
+    def _output(self) -> Path | None:
+        return Path(self.out_dir).resolve() if self.out_dir else self._default_output()
+
+    def _update_labels(self):
+        self._gt_lbl.config(text=self.ground_truth or "Not chosen")
+        self._vid_lbl.config(text=self.videos_dir or "Not chosen")
+        self._circle_lbl.config(text=(f"For all videos: {self.circle_file}" if self.circle_file
+                                      else "Optional: one circle file for every video"))
+        self._update_out_label()
+
+    def _update_out_label(self):
+        if self.out_dir:
+            text = f"Output folder: {self.out_dir}"
+        else:
+            text = (f"Output folder (default): "
+                    f"{self._default_output() or '<videos>/regression_results'}")
+        self._out_lbl.config(text=text + "\nEach run gets its own regression_<date-time> "
+                                         "folder inside it.")
+
+    # ── inputs ───────────────────────────────────────────────────────────
+    def apply_prefill(self, prefill: dict):
+        if prefill.get("ground_truth"):
+            self.ground_truth = str(Path(prefill["ground_truth"]).expanduser().resolve())
+        if prefill.get("videos"):
+            self.videos_dir = str(Path(prefill["videos"]).expanduser().resolve())
+        if prefill.get("parameters"):
+            self._set_parameters(prefill["parameters"])
+        if prefill.get("circle_file"):
+            self.circle_file = str(Path(prefill["circle_file"]).expanduser().resolve())
+        if prefill.get("output"):
+            self.out_dir = str(Path(prefill["output"]).expanduser().resolve())
+        if prefill.get("quadrant"):
+            self.quadrant_var.set(prefill["quadrant"])
+        self.render_var.set(bool(prefill.get("render_video")))
+        self.skip_var.set(bool(prefill.get("skip_missing_circles")))
+        self._update_labels()
+        self._refresh_plan()
+
+    def _choose_gt_csv(self):
+        path = filedialog.askopenfilename(title="Hand-count CSV",
+                                          filetypes=[("CSV", "*.csv"), ("All", "*.*")])
+        if path:
+            self.ground_truth = path
+            self._update_labels()
+            self._refresh_plan()
+
+    def _choose_gt_folder(self):
+        path = filedialog.askdirectory(title="Folder of per-video hand-count CSVs")
+        if path:
+            self.ground_truth = path
+            self._update_labels()
+            self._refresh_plan()
+
+    def _choose_videos(self):
+        path = filedialog.askdirectory(title="Video folder")
+        if path:
+            self.videos_dir = path
+            self._update_labels()
+            self._refresh_plan()
+
+    def _set_parameters(self, path: str) -> bool:
+        try:
+            values = load_tune_values(path)
+            if not values:
+                raise ValueError("No recognized numeric parameters in the file.")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            messagebox.showerror("Parameters", f"Could not load {path}:\n\n{exc}")
+            return False
+        self.parameter_values = {**DEFAULT_PARAMETERS, **values}
+        self.parameters_file = str(Path(path).expanduser().resolve())
+        self._params_lbl.config(text=f"{Path(path).name}  ({len(values)} values)\n"
+                                     f"{self.parameters_file}")
+        return True
+
+    def _load_parameters(self):
+        path = filedialog.askopenfilename(title="Load parameter preset",
+                                          filetypes=[("JSON", "*.json"), ("All", "*.*")])
+        if path:
+            self._set_parameters(path)
+
+    def _reset_parameters(self):
+        self.parameter_values = dict(DEFAULT_PARAMETERS)
+        self.parameters_file = None
+        self._params_lbl.config(text="Defaults (built-in values)")
+
+    def _choose_circle(self):
+        path = filedialog.askopenfilename(title="One circle file for every video",
+                                          filetypes=[("JSON", "*.json"), ("All", "*.*")])
+        if not path:
+            return
+        circle, reason = _read_circle_file(Path(path))
+        if circle is None:
+            messagebox.showerror("Invalid circle file", f"{path}\n\n{reason}")
+            return
+        self.circle_file = path
+        self._update_labels()
+        self._refresh_plan()
+
+    def _clear_circle(self):
+        self.circle_file = None
+        self._update_labels()
+        self._refresh_plan()
+
+    def _select_out(self):
+        path = filedialog.askdirectory(title="Regression output folder")
+        if path:
+            self.out_dir = path
+            self._update_out_label()
+
+    def _clear_out(self):
+        self.out_dir = None
+        self._update_out_label()
+
+    # ── pre-run check ────────────────────────────────────────────────────
+    def _refresh_plan(self):
+        if self._busy:
+            return
+        self.plan, self._plan_error = None, ""
+        if self.ground_truth and self.videos_dir:
+            try:
+                self.plan = plan_regression(self.ground_truth, self.videos_dir,
+                                            self._quadrant(), self.circle_file)
+            except (ValueError, OSError) as exc:
+                self._plan_error = str(exc)
+        self._fill_table()
+        self._refresh_btn()
+
+    def _fill_table(self):
+        self.table.delete(*self.table.get_children())
+        if self.plan is None:
+            self._plan_lbl.config(text=self._plan_error or
+                                  "Choose the hand counts and the video folder")
+            return
+        for index, pair in enumerate(self.plan["pairs"]):
+            circle = pair["circle"]
+            if circle.status == "ok":
+                tag, details = "ready", f"{circle.source}: {circle.path}"
+            else:
+                tag, details = circle.status, circle.reason
+            self.table.insert("", tk.END, iid=f"p{index}", text=pair["video"].name,
+                              values=(pair["title"], tag, details), tags=(tag,))
+        for name in self.plan["unmatched_videos"]:
+            self.table.insert("", tk.END, text=name,
+                              values=("—", "no counts", "not in the hand counts; not scored"),
+                              tags=("unmatched",))
+        c = self._counts()
+        text = (f"{c['matched']} matched · {c['ready']} with circles · "
+                f"{c['missing']} missing/invalid circle · "
+                f"{len(self.plan['unmatched_videos'])} video(s) without hand counts")
+        if self.plan["unmatched_truth"]:
+            text += f" · {len(self.plan['unmatched_truth'])} hand-count row(s) without a video"
+        self._plan_lbl.config(text=text)
+
+    def _counts(self) -> dict:
+        pairs = self.plan["pairs"] if self.plan else []
+        ready = sum(p["circle"].status == "ok" for p in pairs)
+        return {"matched": len(pairs), "ready": ready, "missing": len(pairs) - ready}
+
+    def _can_run(self) -> tuple[bool, str]:
+        if not self.ground_truth or not self.videos_dir:
+            return False, "Choose the hand counts and the video folder."
+        if self.plan is None:
+            return False, self._plan_error or "Nothing to check."
+        c = self._counts()
+        if c["matched"] == 0:
+            return False, "No video names match the hand-count titles."
+        if c["ready"] == 0:
+            return False, "No matched video has a valid circle."
+        if c["missing"] and not self.skip_var.get():
+            return False, (f"{c['missing']} matched video(s) have no valid circle. Make them in "
+                           "the Count ants tab, choose a circle file for all, or tick "
+                           "'Skip videos without a circle'.")
+        if c["missing"]:
+            return True, f"{c['missing']} video(s) without a circle will be skipped."
+        return True, ""
+
+    def _refresh_btn(self):
+        if self._busy or self.app._busy:
+            self._run_btn.config(state=tk.DISABLED)
+            return
+        ok, hint = self._can_run()
+        self._run_btn.config(state=tk.NORMAL if ok else tk.DISABLED)
+        self._hint.config(text=hint)
+
+    # ── run ──────────────────────────────────────────────────────────────
+    def start(self):
+        if self._busy:
+            return
+        if self.app._busy:
+            messagebox.showwarning("Busy", "The Count ants tab is processing; wait for it to finish.")
+            return
+        self._refresh_plan()
+        ok, hint = self._can_run()
+        if not ok:
+            messagebox.showwarning("Cannot run yet", hint)
+            return
+        code_version = self.app.ask_code_version()
+        if code_version is None:
+            self._status("Run cancelled (no code version given).")
+            return
+        apply_tune_values(DEFAULT_PARAMETERS)
+        apply_tune_values(self.parameter_values)
+        self._runnable = [p for p in self.plan["pairs"] if p["circle"].status == "ok"]
+        self._busy = True
+        self._cancel_event = threading.Event()
+        self._run_btn.config(state=tk.DISABLED)
+        self._cancel_btn.config(state=tk.NORMAL)
+        self._prog_var.set(0)
+        self._overall_lbl.config(text=f"0/{len(self._runnable)} videos")
+        self._prog_lbl.config(text="Starting…")
+        self._status("Running regression…")
+        args = dict(ground_truth_dir=self.ground_truth, videos_dir=self.videos_dir,
+                    parameters_file=self.parameters_file, quadrant=self._quadrant(),
+                    circle_file=self.circle_file, output_dir=self.out_dir,
+                    render_video=self.render_var.get(), show_plot=False,
+                    skip_missing_circles=self.skip_var.get(), code_version=code_version)
+        threading.Thread(target=self._thread_body, args=(args,), daemon=True).start()
+
+    def _thread_body(self, args):
+        try:
+            summary = run_regression_mode(
+                **args, progress_cb=self._on_progress,
+                log_cb=lambda m: print(m, flush=True), cancel_event=self._cancel_event)
+            self._ui(lambda s=summary: self._finish(s, None))
+        except Exception as exc:
+            cancelled = self._cancel_event is not None and self._cancel_event.is_set()
+            message = "Cancelled." if cancelled else f"{type(exc).__name__}: {exc}"
+            self._ui(lambda m=message, c=cancelled: self._finish(None, m, c))
+
+    def _on_progress(self, index, total, pct, msg):
+        def update():
+            pair = self._runnable[index - 1] if 0 < index <= len(self._runnable) else None
+            if pair is not None:
+                self._overall_lbl.config(text=f"Video {index}/{total}: {pair['video'].name}")
+                iid = f"p{self.plan['pairs'].index(pair)}"
+                if self.table.exists(iid):
+                    self.table.item(iid, values=(pair["title"], "running",
+                                                 self.table.item(iid, "values")[2]),
+                                    tags=("running",))
+            self._prog_var.set(pct)
+            if msg:
+                self._prog_lbl.config(text=msg)
+        self._ui(update)
+
+    def _finish(self, summary: dict | None, error: str | None, cancelled: bool = False):
+        self._busy = False
+        self._cancel_event = None
+        self._cancel_btn.config(state=tk.DISABLED)
+        if summary is None:
+            self._overall_lbl.config(text="Cancelled" if cancelled else "Stopped")
+            self._prog_lbl.config(text="")
+            self._status(error or "")
+            if not cancelled:
+                messagebox.showerror("Regression stopped", error)
+            self._refresh_plan()
+            self.app._refresh_proc_btn()
+            return
+        self._last_summary = summary
+        self._prog_var.set(100)
+        self._overall_lbl.config(text=f"Done: {summary['videos_evaluated']} video(s) scored")
+        self._prog_lbl.config(text="Complete!")
+        self._show_results(summary)
+        self._status(f"Saved to:\n{summary['output_dir']}")
+        self._refresh_btn()
+        self.app._refresh_proc_btn()
+
+    def cancel(self):
+        if self._cancel_event is not None:
+            self._cancel_event.set()
+            self._status("Cancelling… (finishing the current frame)")
+
+    # ── results ──────────────────────────────────────────────────────────
+    def _show_results(self, summary: dict):
+        fit = summary["linear_regression"]
+
+        def fmt(key, digits=3):
+            value = fit.get(key)
+            return f"{value:.{digits}f}" if isinstance(value, float) else ("N/A" if value is None else str(value))
+
+        lines = [
+            "Predicted vs hand counts",
+            "",
+            f"Points (n)         {fit['n']}",
+            f"Slope   (ideal 1)  {fmt('slope')}",
+            f"Intercept (ideal 0){fmt('intercept'):>6}",
+            f"R²      (ideal 1)  {fmt('r2')}",
+            f"Pearson r          {fmt('r')}",
+            f"p-value            {fmt('p_value', 4)}",
+            f"MAE  (ideal 0)     {fmt('mae', 2)}",
+            f"RMSE (ideal 0)     {fmt('count_rmse', 2)}",
+            f"RMSE (fit line)    {fmt('rmse', 2)}",
+            "",
+            f"Videos scored      {summary['videos_evaluated']}",
+            f"Code version       {summary.get('code_version', '')}",
+            f"Total abs. error   {summary['total_absolute_error']}",
+            f"Exact rows         {summary['exact_match_rows']}",
+        ]
+        if fit.get("fit_note"):
+            lines += ["", fit["fit_note"]]
+        if summary.get("skipped_missing_circle"):
+            lines += ["", f"Skipped (no circle): {len(summary['skipped_missing_circle'])}"]
+        self._stats.config(state=tk.NORMAL)
+        self._stats.delete("1.0", tk.END)
+        self._stats.insert(tk.END, "\n".join(lines))
+        self._stats.config(state=tk.DISABLED)
+
+        # Per-video result in the table.
+        by_name = {v["video"]: v for v in summary["per_video"]}
+        skipped = {s["video"]: s["reason"] for s in summary.get("skipped_missing_circle", [])}
+        for index, pair in enumerate(self.plan["pairs"]):
+            iid = f"p{index}"
+            if not self.table.exists(iid):
+                continue
+            name = pair["video"].name
+            if name in by_name:
+                parts = []
+                for row in by_name[name]["comparison"]:
+                    parts.append(f"{row['quadrant']} in {row['predicted_in']}/{row['ground_truth_in']}"
+                                 f" out {row['predicted_out']}/{row['ground_truth_out']}")
+                total = sum(row["total_abs_error"] for row in by_name[name]["comparison"])
+                self.table.item(iid, values=(pair["title"], "processed",
+                                             f"abs error {total} · " + " · ".join(parts)),
+                                tags=("processed",))
+            elif name in skipped:
+                self.table.item(iid, values=(pair["title"], "skipped", skipped[name]),
+                                tags=("skipped",))
+        self._show_plot()
+
+    def _show_plot(self):
+        summary = self._last_summary
+        if not summary:
+            return
+        path = summary["files"].get("plot")
+        if not path or not os.path.isfile(path):
+            return
+        try:
+            width = max(300, int(self._plot_lbl.winfo_width()) - 10)
+            height = max(200, int(self._plot_lbl.winfo_height()) - 10)
+            image = Image.open(path)
+            image.thumbnail((width, height))
+            self._plot_photo = ImageTk.PhotoImage(image)
+            self._plot_lbl.config(image=self._plot_photo)
+        except Exception as exc:  # display only; the PNG is saved regardless
+            self._plot_lbl.config(text=f"Plot saved to {path}\n({exc})")
+
+    # ── extras ───────────────────────────────────────────────────────────
+    def _copy_command(self):
+        if not (self.ground_truth and self.videos_dir):
+            messagebox.showinfo("Copy CLI command", "Choose the hand counts and the video folder first.")
+            return
+        command = build_command_line(
+            "regression", regression=self.ground_truth, videos=self.videos_dir,
+            quadrant=self._quadrant(), parameters=self.parameters_file,
+            circle_file=self.circle_file, output=self.out_dir,
+            render_video=self.render_var.get(), skip_missing_circles=self.skip_var.get(),
+            code_version=self.app.code_version)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(command)
+        print(command, flush=True)
+        self._status(f"Copied to clipboard:\n{command}")
+
+    def _open_output(self):
+        # After a run, open that run's own folder (regression_<date-time>/).
+        folder = (Path(self._last_summary["output_dir"]) if self._last_summary
+                  else self._output())
+        if not folder or not folder.is_dir():
+            messagebox.showinfo("Output folder", "The output folder doesn't exist yet; run first.")
+            return
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", str(folder)])
+            elif os.name == "nt":
+                os.startfile(str(folder))  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+        except OSError as exc:
+            messagebox.showerror("Output folder", f"{folder}\n\n{exc}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2700,8 +4302,11 @@ class AntOptunaOptimizer:
     settings are restored after each evaluation, preventing trial leakage.
     """
     def __init__(self, dataset: OptimizationDataset, n_trials: int = 30,
-                 match_distance_px: float = 25.0, seed: int = 42):
+                 match_distance_px: float = 25.0, seed: int = 42,
+                 code_version: str | None = None, parameters_file: str | None = None):
         self.dataset = dataset
+        self.code_version = code_version
+        self.parameters_file = parameters_file
         self.n_trials = int(n_trials)
         self.match_distance_px = float(match_distance_px)
         self.seed = int(seed)
@@ -2819,12 +4424,24 @@ class AntOptunaOptimizer:
         study.optimize(self.objective, n_trials=self.n_trials, n_jobs=1,
                        gc_after_trial=True, callbacks=[on_trial_complete])
         _opt_progress('Saving optimized parameters and trial history...')
-        self.result_writer.save(study, self.dataset.root, self)
+        run_dir = _unique_run_folder(self.dataset.root, 'optuna')
+        self.result_writer.save(study, run_dir, self)
+        write_run_metadata(run_dir, build_run_metadata(
+            'optimize', self.code_version, self.parameters_file, {
+                'study_database': str(self.dataset.root / 'ant_optuna_study.sqlite3'),
+                'trials_this_run': self.n_trials, 'match_distance_px': self.match_distance_px,
+                'seed': self.seed,
+                'videos': [str(p.video_path) for p in self.dataset.pairs],
+                'ground_truth': [str(p.ground_truth_path) for p in self.dataset.pairs],
+                'note': 'parameters.values_used are the BASE settings; the tuned '
+                        'values are in ant_tuning_parameters.json'}))
         _opt_progress(f'FINISHED | best objective={study.best_value:.5f} | '
                       f'total elapsed {_opt_elapsed(time.monotonic() - started)}')
-        _opt_progress(f'Best settings: {self.dataset.root / "ant_tuning_parameters.json"}')
-        _opt_progress(f'Detailed metrics: {self.dataset.root / "optuna_results.json"}')
-        _opt_progress(f'Trial history: {self.dataset.root / "optuna_trials.csv"}')
+        _opt_progress(f'Results folder: {run_dir}')
+        _opt_progress(f'Best settings: {run_dir / "ant_tuning_parameters.json"}')
+        _opt_progress(f'Detailed metrics: {run_dir / "optuna_results.json"}')
+        _opt_progress(f'Trial history: {run_dir / "optuna_trials.csv"}')
+        _opt_progress(f'Run metadata: {run_dir / "run_metadata.json"}')
 
     def run(self) -> None:
         _opt_progress(f'Optimization dataset: {self.dataset.root}')
@@ -2838,14 +4455,18 @@ def run_optimization_mode(folder: str | Path, n_trials: int = 30,
                           match_distance_px: float = 25.0, seed: int = 42,
                           ground_truth_dir: str | Path | None = None,
                           videos_dir: str | Path | None = None,
-                          output_dir: str | Path | None = None) -> None:
+                          output_dir: str | Path | None = None,
+                          code_version: str | None = None,
+                          parameters_file: str | None = None) -> None:
     """CLI optimization entry point. No Tkinter GUI or preview is opened."""
+    _require_optuna()
     if n_trials < 1:
         raise ValueError('--trials must be >= 1')
     if not math.isfinite(match_distance_px) or match_distance_px <= 0:
         raise ValueError('--match-distance must be a positive finite pixel distance')
     dataset = load_optimization_dataset(folder, ground_truth_dir, videos_dir, output_dir)
-    AntOptunaOptimizer(dataset, n_trials, match_distance_px, seed).run()
+    AntOptunaOptimizer(dataset, n_trials, match_distance_px, seed,
+                       code_version, parameters_file).run()
 
 
 
@@ -2944,25 +4565,77 @@ def _regression_read_truth(csv_path: Path, selected_quadrant: str | None):
     return truth
 
 
-def _regression_circle(video: Path, gt_directory: Path, circle_file: str | None):
-    """Prefer per-video circle calibration; optional shared override for all videos."""
+def _regression_circle_lookup(video: Path, gt_directory: Path,
+                              circle_file: str | None) -> 'CircleLookup':
+    """Find a regression video's circle without raising.
+
+    Order: --circle-file (every video) -> next to the video -> ground-truth
+    folder -> <videos>/circles/. The first file found decides.
+    """
     if circle_file:
-        candidate_paths = [Path(circle_file).expanduser()]
+        candidates = [('shared', Path(circle_file).expanduser().resolve())]
     else:
-        candidate_paths = [
-            video.with_name(f'{video.stem}_circle.json'),
-            gt_directory / f'{video.stem}_circle.json',
-            video.parent / 'circles' / f'{video.stem}_circle.json',
-        ]
-    for candidate in candidate_paths:
+        name = f'{video.stem}_circle.json'
+        candidates = [('video folder', video.with_name(name)),
+                      ('ground-truth folder', gt_directory / name),
+                      ('circles/ folder', video.parent / 'circles' / name)]
+    for source, candidate in candidates:
         if candidate.is_file():
-            circle = _load_circle_json(str(candidate))
-            if circle is None or circle['radius'] <= 0:
-                raise ValueError(f'Invalid circle calibration: {candidate}')
-            return circle, candidate
-    raise ValueError(f'No circle JSON for {video.name}. Expected '
-                     f'{video.stem}_circle.json next to video or ground truth; '
-                     f'or pass --circle-file FILE')
+            circle, reason = _read_circle_file(candidate)
+            return CircleLookup('ok' if circle else 'invalid', circle, candidate, source, reason)
+    if circle_file:
+        return CircleLookup('invalid', None, candidates[0][1], 'shared',
+                            f'--circle-file not found: {candidates[0][1]}')
+    return CircleLookup('missing', reason=(f'no {video.stem}_circle.json next to the video, '
+                                           'in the ground-truth folder or in circles/'))
+
+
+def _regression_circle(video: Path, gt_directory: Path, circle_file: str | None):
+    """Raising wrapper: (circle, path) or ValueError."""
+    lookup = _regression_circle_lookup(video, gt_directory, circle_file)
+    if lookup.status == 'ok':
+        return lookup.circle, lookup.path
+    raise ValueError(f'{video.name}: {lookup.reason}')
+
+
+def plan_regression(ground_truth: str, videos_dir: str, quadrant: str | None = None,
+                    circle_file: str | None = None) -> dict:
+    """Pre-run check for regression (used by the CLI and the GUI).
+
+    Matches videos (top level of videos_dir) to ground-truth titles and finds
+    each matched video's circle. Nothing is processed. Raises ValueError for
+    unusable inputs (missing folder, no videos, unreadable ground truth).
+    """
+    gt_path = Path(ground_truth).expanduser().resolve()
+    vid_dir = Path(videos_dir).expanduser().resolve()
+    if not vid_dir.is_dir():
+        raise ValueError(f'--videos is not a directory: {vid_dir}')
+    if quadrant is not None:
+        quadrant = quadrant.upper()
+        if quadrant not in _QUADRANTS:
+            raise ValueError('--quadrant must be NE, SE, SW or NW')
+    videos = sorted(p for p in vid_dir.iterdir() if p.is_file() and _is_video_file(p))
+    if not videos:
+        raise ValueError(f'No supported videos found in {vid_dir}')
+    labels = _regression_truth_catalog(str(gt_path), quadrant)
+    video_catalog = {v.stem.casefold(): v for v in videos}
+    gt_directory = gt_path.parent if gt_path.is_file() else gt_path
+    pairs = []
+    for video in videos:
+        key = video.stem.casefold()
+        if key not in labels:
+            continue
+        title, truth, csv_path, colony_id, video_date = labels[key]
+        pairs.append({'video': video, 'title': title, 'truth': truth, 'csv_path': csv_path,
+                      'colony_id': colony_id, 'video_date': video_date,
+                      'circle': _regression_circle_lookup(video, gt_directory, circle_file)})
+    return {
+        'ground_truth': gt_path, 'videos_dir': vid_dir, 'quadrant': quadrant,
+        'videos': videos, 'pairs': pairs,
+        'unmatched_videos': sorted(v.name for v in videos if v.stem.casefold() not in labels),
+        'unmatched_truth': sorted(item[0] for stem, item in labels.items()
+                                  if stem not in video_catalog),
+    }
 
 
 def _regression_truth_catalog(source: str, quadrant: str | None):
@@ -3184,43 +4857,100 @@ def _runtime_parameter_snapshot() -> dict:
     return {key: globals()[key] for key in keys if key in globals()}
 
 
-def _write_regression_run_metadata(output: Path, parameters_file: str | None,
-                                   videos: list[Path], pairs: list[tuple],
-                                   circle_file: str | None, render_video: bool) -> Path:
-    """Write provenance beside regression metrics for reproducible comparisons."""
+def _timestamp_slug(moment: datetime | None = None) -> str:
+    """Local date-time for folder names, e.g. 2026-11-25_14-53-07."""
+    return (moment or datetime.now()).strftime('%Y-%m-%d_%H-%M-%S')
+
+
+def _unique_run_folder(root: str | Path, prefix: str) -> Path:
+    """Create <root>/<prefix>_<date-time>/ (with _2, _3… if it exists) so a run
+    never overwrites an earlier run's files."""
+    root = Path(root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    base = root / f'{prefix}_{_timestamp_slug()}'
+    folder, n = base, 2
+    while folder.exists():
+        folder, n = Path(f'{base}_{n}'), n + 1
+    folder.mkdir(parents=True)
+    return folder
+
+
+def detect_code_version() -> str:
+    """Best guess of the code version from git (tag or commit, '-dirty' when
+    there are uncommitted changes); '' if this is not a git checkout."""
+    try:
+        return subprocess.run(
+            ['git', '-C', str(Path(__file__).resolve().parent), 'describe',
+             '--tags', '--always', '--dirty'],
+            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        return ''
+
+
+def build_run_metadata(mode: str, code_version: str | None,
+                       parameters_file: str | None, extra: dict | None = None) -> dict:
+    """Provenance for one run: date, the GitHub version the user entered, git
+    details, and the exact parameter values in effect for this run."""
+    now = datetime.now().astimezone()
     script_path = Path(__file__).resolve()
     settings_path = Path(parameters_file).expanduser().resolve() if parameters_file else None
     settings_sha256 = None
     if settings_path and settings_path.is_file():
         settings_sha256 = hashlib.sha256(settings_path.read_bytes()).hexdigest()
     payload = {
-        "metadata_schema_version": 1,
-        "run_started_at_utc": datetime.now(timezone.utc).isoformat(),
-        "script": {"file_name": script_path.name, "absolute_path": str(script_path),
-                   "source_file_sha256": hashlib.sha256(script_path.read_bytes()).hexdigest()},
-        "git": _git_metadata(script_path),
-        "parameters": {"file": str(settings_path) if settings_path else None,
-                       "file_sha256": settings_sha256,
-                       "effective_runtime_values": _runtime_parameter_snapshot()},
-        "execution": {"command_line": sys.argv, "videos_directory": str(Path(videos[0]).parent),
-                      "video_count_found": len(videos), "video_count_evaluated": len(pairs),
-                      "render_video": bool(render_video),
-                      "shared_circle_file": str(Path(circle_file).expanduser().resolve()) if circle_file else None},
-        "videos": [{"video": str(item[0]), "ground_truth_title": item[1],
-                    "colony_id": item[6], "video_date": item[7],
-                    "ground_truth_csv": str(item[5]), "circle_file": str(item[4])}
-                   for item in pairs],
+        'metadata_schema_version': 2,
+        'mode': mode,
+        'date': now.strftime('%Y-%m-%d'),
+        'time': now.strftime('%H:%M:%S'),
+        'timezone': now.tzname(),
+        'run_started_at_local': now.isoformat(),
+        'run_started_at_utc': now.astimezone(timezone.utc).isoformat(),
+        'code_version': code_version or 'not provided',
+        'git_detected': _git_metadata(script_path),
+        'script': {'file_name': script_path.name, 'absolute_path': str(script_path),
+                   'source_file_sha256': hashlib.sha256(script_path.read_bytes()).hexdigest()},
+        'command_line': sys.argv,
+        'parameters': {'file': str(settings_path) if settings_path else None,
+                       'file_sha256': settings_sha256,
+                       'values_used': _runtime_parameter_snapshot()},
     }
-    destination = output / "regression_run_metadata.json"
-    destination.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+    payload.update(extra or {})
+    return payload
+
+
+def write_run_metadata(folder: Path, payload: dict, name: str = 'run_metadata.json') -> Path:
+    destination = Path(folder) / name
+    destination.write_text(json.dumps(payload, indent=2, default=str) + '\n', encoding='utf-8')
     return destination
+
+
+def _write_regression_run_metadata(output: Path, parameters_file: str | None,
+                                   videos: list[Path], pairs: list[tuple],
+                                   circle_file: str | None, render_video: bool,
+                                   code_version: str | None = None) -> Path:
+    """Write provenance beside regression metrics for reproducible comparisons."""
+    payload = build_run_metadata('regression', code_version, parameters_file, {
+        'execution': {'videos_directory': str(Path(videos[0]).parent),
+                      'video_count_found': len(videos), 'video_count_evaluated': len(pairs),
+                      'render_video': bool(render_video),
+                      'shared_circle_file': (str(Path(circle_file).expanduser().resolve())
+                                             if circle_file else None)},
+        'videos': [{'video': str(item[0]), 'ground_truth_title': item[1],
+                    'colony_id': item[6], 'video_date': item[7],
+                    'ground_truth_csv': str(item[5]), 'circle_file': str(item[4])}
+                   for item in pairs],
+    })
+    return write_run_metadata(output, payload, 'regression_run_metadata.json')
 
 
 def run_regression_mode(ground_truth_dir: str, videos_dir: str,
                         parameters_file: str | None = None,
                         quadrant: str | None = None, circle_file: str | None = None,
                         output_dir: str | None = None, render_video: bool = False,
-                        show_plot: bool = False):
+                        show_plot: bool = False, skip_missing_circles: bool = False,
+                        progress_cb=None, log_cb=None,
+                        cancel_event: threading.Event | None = None,
+                        code_version: str | None = None):
     """Run tracker on videos, then calculate the exact regression from the reference.
 
     Ground truth: one consolidated CSV with Video Title and quadrant Enter/Exit
@@ -3229,54 +4959,56 @@ def run_regression_mode(ground_truth_dir: str, videos_dir: str,
     regression_summary.json (OLS stats), regression_plot.png and event CSVs.
     Only video titles matching actual video stems are scored. Warnings list any
     unmatched videos/labels rather than assuming missing labels mean zero.
+    Matched videos without a valid circle stop the run (all are listed), unless
+    skip_missing_circles, which skips and reports them instead.
+    progress_cb(video_index, video_total, percent, message), log_cb(message)
+    and cancel_event are used by the GUI; the CLI prints to the terminal.
     """
-    gt_path = Path(ground_truth_dir).expanduser().resolve()
-    vid_dir = Path(videos_dir).expanduser().resolve()
-    if not vid_dir.is_dir():
-        raise ValueError(f'--videos is not a directory: {vid_dir}')
-    if quadrant is not None:
-        quadrant = quadrant.upper()
-        if quadrant not in _QUADRANTS:
-            raise ValueError('--quadrant must be NE, SE, SW or NW')
+    log = log_cb or (lambda message: print(message, flush=True))
+    plan = plan_regression(ground_truth_dir, videos_dir, quadrant, circle_file)
+    gt_path, vid_dir, quadrant = plan['ground_truth'], plan['videos_dir'], plan['quadrant']
+    videos = plan['videos']
     params = load_tune_values(parameters_file) if parameters_file else {}
-    output = Path(output_dir).expanduser().resolve() if output_dir else vid_dir / 'regression_results'
-    output.mkdir(parents=True, exist_ok=True)
-    videos = sorted(p for p in vid_dir.iterdir()
-                    if p.is_file() and p.suffix.lower() in OPTIMIZE_VIDEO_EXTENSIONS)
-    if not videos:
-        raise ValueError(f'No supported videos found in {vid_dir}')
-    labels = _regression_truth_catalog(str(gt_path), quadrant)
-    video_catalog = {v.stem.casefold(): v for v in videos}
-    unmatched_videos = sorted(v.name for v in videos if v.stem.casefold() not in labels)
-    unmatched_truth = sorted(item[0] for stem, item in labels.items() if stem not in video_catalog)
+    # Every run gets its own folder: <output>/regression_<date-time>/
+    output_root = (Path(output_dir).expanduser().resolve() if output_dir
+                   else vid_dir / 'regression_results')
+    unmatched_videos, unmatched_truth = plan['unmatched_videos'], plan['unmatched_truth']
     for name in unmatched_videos:
-        print(f'WARNING: no ground truth for video {name}; skipping', flush=True)
+        log(f'WARNING: no ground truth for video {name}; skipping')
     for name in unmatched_truth:
-        print(f'WARNING: ground truth has no matching video {name}; skipping', flush=True)
-    pairs = []
-    for video in videos:
-        if video.stem.casefold() not in labels:
-            continue
-        title, truth, csv_path, colony_id, video_date = labels[video.stem.casefold()]
-        circle, circle_path = _regression_circle(video, gt_path.parent if gt_path.is_file() else gt_path,
-                                                 circle_file)
-        pairs.append((video, title, truth, circle, circle_path, csv_path, colony_id, video_date))
+        log(f'WARNING: ground truth has no matching video {name}; skipping')
+    bad = [p for p in plan['pairs'] if p['circle'].status != 'ok']
+    if bad and not skip_missing_circles:
+        raise ValueError('These matched videos have no valid circle (create them in the GUI, '
+                         'pass --circle-file, or use --skip-missing-circles):\n'
+                         + '\n'.join(f"  {p['video'].name}: {p['circle'].reason}" for p in bad))
+    skipped_no_circle = [{'video': p['video'].name, 'reason': p['circle'].reason} for p in bad]
+    for entry in skipped_no_circle:
+        log(f"SKIP {entry['video']}: {entry['reason']}")
+    pairs = [(p['video'], p['title'], p['truth'], p['circle'].circle, p['circle'].path,
+              p['csv_path'], p['colony_id'], p['video_date'])
+             for p in plan['pairs'] if p['circle'].status == 'ok']
     if not pairs:
-        raise ValueError('No videos matched Video Title values or per-video ground-truth CSV names')
+        raise ValueError('No videos to score: none matched the ground truth'
+                         + (' with a valid circle' if bad else ''))
+    output = _unique_run_folder(output_root, 'regression')
+    log(f'Output folder: {output}')
     metadata_path = _write_regression_run_metadata(output, parameters_file, videos, pairs,
-                                                   circle_file, render_video)
+                                                   circle_file, render_video, code_version)
     comparison = []
     long_rows = []
     per_video = []
     totals = {q: {'gt_in': 0, 'gt_out': 0, 'pred_in': 0, 'pred_out': 0} for q in _QUADRANTS}
     for index, (video, title, truth, circle, circle_path, truth_path, colony_id, video_date) in enumerate(pairs, 1):
-        print(f'[{index}/{len(pairs)}] Processing {video.name} | circle={circle_path.name}', flush=True)
-        def progress(pct, msg):
-            if pct > 0 and 'Frame ' in msg:
-                print(f'  {pct:.1f}% {msg}', flush=True)
+        log(f'[{index}/{len(pairs)}] Processing {video.name} | circle={circle_path.name}')
+        def progress(pct, msg, _index=index):
+            if progress_cb is not None:
+                progress_cb(_index, len(pairs), pct, msg)
+            elif pct > 0 and 'Frame ' in msg:
+                log(f'  {pct:.1f}% {msg}')
         processor = VideoProcessor(str(video), circle, progress, lambda message: None,
                                    out_dir=str(output / 'events'), stem=video.stem,
-                                   render_video=render_video)
+                                   render_video=render_video, cancel_event=cancel_event)
         events, entered, exited, paths = processor.run()
         if events is None:
             raise RuntimeError(f'Processing cancelled: {video.name}')
@@ -3302,8 +5034,8 @@ def run_regression_mode(ground_truth_dir: str, videos_dir: str,
                                   'absolute_error': abs(predicted - gt)})
             totals[q]['gt_in'] += gt_in; totals[q]['gt_out'] += gt_out
             totals[q]['pred_in'] += pred_in; totals[q]['pred_out'] += pred_out
-            print(f'  {q}: IN {pred_in} / GT {gt_in} (error {in_error:+d}); '
-                  f'OUT {pred_out} / GT {gt_out} (error {out_error:+d})', flush=True)
+            log(f'  {q}: IN {pred_in} / GT {gt_in} (error {in_error:+d}); '
+                  f'OUT {pred_out} / GT {gt_out} (error {out_error:+d})')
         per_video.append({'video': video.name, 'video_title': title,
                           'colony_id': colony_id, 'video_date': video_date,
                           'circle_file': str(circle_path), 'ground_truth_csv': str(truth_path),
@@ -3326,49 +5058,418 @@ def run_regression_mode(ground_truth_dir: str, videos_dir: str,
                'total_absolute_error': sum(row['total_abs_error'] for row in comparison),
                'exact_match_rows': sum(row['exact_match'] for row in comparison),
                'unmatched_videos': unmatched_videos, 'unmatched_ground_truth': unmatched_truth,
+               'skipped_missing_circle': skipped_no_circle,
+               'output_dir': str(output),
+               'code_version': code_version or 'not provided',
                'quadrant_totals': {q: v for q, v in totals.items()
                                    if any(row['quadrant'] == q for row in comparison)},
                'settings_file': str(parameters_file) if parameters_file else None,
                'settings_applied': params, 'per_video': per_video,
                'files': {'comparison': str(comparison_path), 'results': str(csv_path),
-                         'plot': str(plot_path), 'run_metadata': str(metadata_path)}}
+                         'plot': str(plot_path), 'run_metadata': str(metadata_path),
+                         'summary': str(output / 'regression_summary.json')}}
     summary_path = output / 'regression_summary.json'
     summary_path.write_text(json.dumps(summary, indent=2), encoding='utf-8')
-    print('\n── Linear regression: predicted ~ ground truth ──', flush=True)
+    log('\n── Linear regression: predicted ~ ground truth ──')
     for label, key in [('n', 'n'), ('Slope (ideal 1)', 'slope'),
                        ('Intercept (ideal 0)', 'intercept'), ('R²', 'r2'),
                        ('Pearson r', 'r'), ('p-value', 'p_value'),
                        ('RMSE (fitted line)', 'rmse'), ('MAE (vs ideal)', 'mae'),
                        ('RMSE (vs ideal)', 'count_rmse')]:
         v = fit[key]
-        print(f'  {label:<22}: {v:.4f}' if isinstance(v, float) else
-              f'  {label:<22}: {v if v is not None else "N/A"}', flush=True)
+        log(f'  {label:<22}: {v:.4f}' if isinstance(v, float) else
+              f'  {label:<22}: {v if v is not None else "N/A"}')
     if fit['fit_note']:
-        print(f"  NOTE: {fit['fit_note']}", flush=True)
-    print(f'\nSaved: {csv_path}\n       {comparison_path}\n       {plot_path}\n       {summary_path}\n       {metadata_path}', flush=True)
+        log(f"  NOTE: {fit['fit_note']}")
+    log(f'\nSaved: {csv_path}\n       {comparison_path}\n       {plot_path}\n       {summary_path}\n       {metadata_path}')
     return summary
 
 
 # ============================================================================
-# SHARED CLI EXECUTION: one argument parser and reusable batch components.
+# SHARED RUN-MODE CORE: video discovery, circle lookup, batch plan + execution.
+# Used by BOTH the CLI (--run) and the GUI, so the two cannot drift apart.
 # ============================================================================
-def _videos_from_inputs(videos_dir: str | None, video_file: str | None) -> list[Path]:
-    """Resolve batch or single inputs; never open a file dialog in CLI mode."""
-    if bool(videos_dir) == bool(video_file):
+
+# Effective parameter values at import time (the source-code defaults).
+# Taken before any --parameters file is applied; GUI "Reset to defaults" and
+# every GUI run start from this snapshot.
+DEFAULT_PARAMETERS = _runtime_parameter_snapshot()
+
+
+def _is_video_file(path: Path) -> bool:
+    """Supported video, excluding hidden/AppleDouble files and our own renders."""
+    name = path.name
+    return (path.suffix.lower() in OPTIMIZE_VIDEO_EXTENSIONS
+            and not name.startswith('.')            # hidden and macOS ._ files
+            and not path.stem.lower().endswith('_counted'))
+
+
+def _as_file_list(video_file) -> list[str]:
+    """Normalize --video input: None, one path, or a list of paths."""
+    if not video_file:
+        return []
+    if isinstance(video_file, (str, os.PathLike)):
+        return [str(video_file)]
+    return [str(v) for v in video_file if v]
+
+
+def _videos_from_inputs(videos_dir: str | None, video_file,
+                        recursive: bool = False,
+                        exclude_dir: str | Path | None = None) -> list[Path]:
+    """Resolve video file(s) or a folder (tree) into a video list.
+
+    video_file may be one path or a list of paths from any folders (repeated
+    --video, or the GUI's video list); duplicates are dropped, order is kept.
+    Recursive search skips hidden folders and the output folder (exclude_dir)
+    so earlier results are never picked up again. Never opens a dialog.
+    """
+    files = _as_file_list(video_file)
+    if bool(videos_dir) == bool(files):
         raise ValueError('Specify exactly one of --videos DIRECTORY or --video FILE')
-    if video_file:
-        path = Path(video_file).expanduser().resolve()
-        if not path.is_file() or path.suffix.lower() not in OPTIMIZE_VIDEO_EXTENSIONS:
-            raise ValueError(f'Invalid or unsupported video: {path}')
-        return [path]
+    if files:
+        if recursive:
+            raise ValueError('--recursive applies to a folder (--videos), not to --video files')
+        videos, seen = [], set()
+        for name in files:
+            path = Path(name).expanduser().resolve()
+            if not path.is_file() or path.suffix.lower() not in OPTIMIZE_VIDEO_EXTENSIONS:
+                raise ValueError(f'Invalid or unsupported video: {path}')
+            if path not in seen:
+                seen.add(path)
+                videos.append(path)
+        return videos
     directory = Path(videos_dir).expanduser().resolve()
     if not directory.is_dir():
         raise ValueError(f'Video directory not found: {directory}')
-    videos = sorted(path for path in directory.iterdir()
-                    if path.is_file() and path.suffix.lower() in OPTIMIZE_VIDEO_EXTENSIONS)
-    if not videos:
-        raise ValueError(f'No supported videos found in: {directory}')
-    return videos
+    exclude = Path(exclude_dir).expanduser().resolve() if exclude_dir else None
+    if recursive:
+        found = []
+        for root, dirs, files in os.walk(directory):
+            root_path = Path(root)
+            dirs[:] = sorted(
+                d for d in dirs
+                if not d.startswith('.')
+                and not (exclude is not None and (root_path / d).resolve() == exclude))
+            found.extend(root_path / f for f in sorted(files) if _is_video_file(root_path / f))
+    else:
+        found = [p for p in sorted(directory.iterdir()) if p.is_file() and _is_video_file(p)]
+    if not found:
+        where = 'in or below' if recursive else 'in'
+        raise ValueError(f'No supported videos found {where}: {directory}')
+    return sorted(found, key=lambda p: str(p.relative_to(directory)).casefold())
+
+
+@dataclass
+class CircleLookup:
+    """Result of finding one video's circle: ok, missing, or invalid."""
+    status: str                      # 'ok' | 'missing' | 'invalid'
+    circle: dict | None = None
+    path: Path | None = None
+    source: str = ''                 # 'shared', 'video folder', 'output folder', 'preview'
+    reason: str = ''
+
+
+def _read_circle_file(path: Path) -> tuple[dict | None, str]:
+    """Parse and validate a circle JSON; return (circle, '') or (None, reason)."""
+    try:
+        data = json.loads(Path(path).read_text(encoding='utf-8'))
+    except json.JSONDecodeError as exc:
+        return None, f'unreadable JSON ({exc.msg}, line {exc.lineno})'
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, f'cannot read file ({exc})'
+    circle = _normalize_circle_params(data)
+    if circle is None:
+        return None, 'missing center, radius, or north_angle/north_point'
+    if not (math.isfinite(circle['radius']) and circle['radius'] > 0):
+        return None, f"radius must be positive (got {circle['radius']})"
+    return circle, ''
+
+
+def _batch_circle(video: Path, output_dir: str | Path | None,
+                  circle_file: str | None = None) -> CircleLookup:
+    """Find a video's circle without raising.
+
+    Order: shared circle_file (if given, used for every video) ->
+    <video folder>/<stem>_circle.json -> <output_dir>/<stem>_circle.json.
+    output_dir is this video's own output folder (mirrored in recursive runs).
+    The first file found decides: an invalid file is reported, not skipped over.
+    """
+    if circle_file:
+        path = Path(circle_file).expanduser().resolve()
+        if not path.is_file():
+            return CircleLookup('invalid', None, path, 'shared',
+                                f'shared circle file not found: {path}')
+        circle, reason = _read_circle_file(path)
+        return CircleLookup('ok' if circle else 'invalid', circle, path, 'shared', reason)
+    name = f'{video.stem}_circle.json'
+    candidates = [('video folder', video.parent)]
+    if output_dir:
+        candidates.append(('output folder', Path(output_dir)))
+    for source, folder in candidates:
+        path = folder / name
+        if path.is_file():
+            circle, reason = _read_circle_file(path)
+            return CircleLookup('ok' if circle else 'invalid', circle, path, source, reason)
+    return CircleLookup('missing', reason=f'no {name} in the video folder or output folder')
+
+
+@dataclass
+class BatchItem:
+    """One video in a batch plan, with its circle and output folder."""
+    video: Path
+    relative: str
+    output_dir: Path
+    circle: CircleLookup
+    conflict: str = ''               # e.g. duplicate output name
+    status: str = 'pending'          # pending/running/processed/failed/skipped/cancelled
+    message: str = ''
+    result: dict | None = None
+
+    @property
+    def state(self) -> str:
+        """Pre-run readiness: 'ready', 'missing' or 'invalid'."""
+        if self.conflict:
+            return 'invalid'
+        return 'ready' if self.circle.status == 'ok' else self.circle.status
+
+    @property
+    def reason(self) -> str:
+        return self.conflict or self.circle.reason
+
+
+@dataclass
+class BatchPlan:
+    """Everything decided before processing starts (the pre-run check)."""
+    input_root: Path
+    output_root: Path
+    items: list
+    recursive: bool = False
+    single_video: bool = False
+    circle_file: str | None = None
+
+    def counts(self) -> dict:
+        states = [item.state for item in self.items]
+        return {'total': len(states), 'ready': states.count('ready'),
+                'missing': states.count('missing'), 'invalid': states.count('invalid')}
+
+    def summary_line(self) -> str:
+        c = self.counts()
+        return (f"Found {c['total']} video(s) | {c['ready']} with circles | "
+                f"{c['missing']} missing | {c['invalid']} invalid")
+
+    def problem_lines(self) -> list[str]:
+        return [f'  {item.state.upper():8s} {item.relative}: {item.reason}'
+                for item in self.items if item.state != 'ready']
+
+
+class BatchAbort(RuntimeError):
+    """Batch stopped (strict mode problem, or nothing processable)."""
+    def __init__(self, message: str, summary: dict | None = None):
+        super().__init__(message)
+        self.summary = summary
+
+
+def default_output_root(videos_dir: str | None, video_file) -> Path:
+    """Video file(s) -> ./outputs ; folder -> <folder>/batch_results."""
+    if _as_file_list(video_file):
+        return Path.cwd() / 'outputs'
+    return Path(videos_dir).expanduser().resolve() / 'batch_results'
+
+
+def plan_batch(videos_dir: str | None = None, video_file=None,
+               recursive: bool = False, circle_file: str | None = None,
+               output_dir: str | None = None) -> BatchPlan:
+    """Discover videos and locate every circle; nothing is processed here.
+
+    Folder input: outputs mirror the folder tree under the output root.
+    File input (one or more files from any folders): outputs go directly in
+    the output root; two files with the same name are flagged as a conflict.
+    """
+    output_root = (Path(output_dir).expanduser().resolve() if output_dir
+                   else default_output_root(videos_dir, video_file))
+    videos = _videos_from_inputs(videos_dir, video_file, recursive, exclude_dir=output_root)
+    from_files = bool(_as_file_list(video_file))
+    if from_files:
+        # Label files relative to their deepest common folder (just the file
+        # name when they all share one folder).
+        common = Path(os.path.commonpath([str(v.parent) for v in videos]))
+        root = common
+    else:
+        root = Path(videos_dir).expanduser().resolve()
+    items = []
+    claimed = {}
+    for video in videos:
+        relative = video.relative_to(root)
+        out = output_root if from_files else output_root / relative.parent
+        item = BatchItem(video, str(relative), out, _batch_circle(video, out, circle_file))
+        # Two videos with the same stem in one output folder would overwrite
+        # each other's results (e.g. GX01.MP4 and GX01.mov).
+        key = (str(out).casefold(), video.stem.casefold())
+        if key in claimed:
+            item.conflict = (f'same name as {claimed[key]}; outputs would overwrite it '
+                             '(rename one of the videos)')
+        else:
+            claimed[key] = str(relative)
+        items.append(item)
+    return BatchPlan(root, output_root, items, recursive, len(videos) == 1 and from_files,
+                     circle_file)
+
+
+def execute_batch(plan: BatchPlan, strict: bool = False, render_video: bool = False,
+                  parameters_file: str | None = None, progress_cb=None, video_cb=None,
+                  log_cb=print, cancel_event: threading.Event | None = None,
+                  code_version: str | None = None, interface: str = 'cli') -> dict:
+    """Process every ready video in a plan and write batch_summary.json.
+
+    progress_cb(video_index, video_total, percent, message) - per-video progress.
+    video_cb(item) - called whenever an item's status changes.
+    strict: any missing/invalid circle stops BEFORE processing; any processing
+    failure stops the run. Otherwise those videos are skipped/recorded.
+    Raises BatchAbort when the run stops early (summary is still written).
+    """
+    log = log_cb or (lambda message: None)
+    notify = video_cb or (lambda item: None)
+    counts = plan.counts()
+    if strict and (counts['missing'] or counts['invalid']):
+        raise BatchAbort('Strict mode: fix these circles before processing '
+                         '(nothing was processed):\n' + '\n'.join(plan.problem_lines()))
+    plan.output_root.mkdir(parents=True, exist_ok=True)
+    started = datetime.now(timezone.utc)
+    # Written before processing, so it exists even if the run stops early.
+    metadata_path = write_run_metadata(plan.output_root, build_run_metadata(
+        'run', code_version, parameters_file, {
+            'interface': interface,
+            'inputs': {'input': str(plan.input_root), 'recursive': plan.recursive,
+                       'shared_circle_file': plan.circle_file, 'strict': strict,
+                       'render_video': bool(render_video)},
+            'output': str(plan.output_root),
+            'videos': [{'video': str(item.video), 'relative_path': item.relative,
+                        'circle_status': item.state,
+                        'circle_file': str(item.circle.path) if item.circle.path else None,
+                        'circle_source': item.circle.source,
+                        'circle': item.circle.circle}
+                       for item in plan.items],
+        }))
+
+    for item in plan.items:
+        if item.state != 'ready':
+            item.status, item.message = 'skipped', item.reason
+            log(f'SKIP {item.relative}: {item.reason}')
+            notify(item)
+    runnable = [item for item in plan.items if item.state == 'ready']
+    abort_message = None
+
+    for index, item in enumerate(runnable, 1):
+        if cancel_event is not None and cancel_event.is_set():
+            item.status, item.message = 'cancelled', 'batch cancelled before this video'
+            notify(item)
+            continue
+        item.status = 'running'
+        notify(item)
+        log(f'[{index}/{len(runnable)}] Processing {item.relative} | '
+            f'circle={item.circle.path or "drawn in GUI"} ({item.circle.source})')
+
+        def per_video(pct, msg, _index=index):
+            if progress_cb is not None:
+                progress_cb(_index, len(runnable), pct, msg)
+
+        processor = VideoProcessor(str(item.video), item.circle.circle, per_video,
+                                   lambda message: None, out_dir=str(item.output_dir),
+                                   stem=item.video.stem, render_video=render_video,
+                                   cancel_event=cancel_event)
+        try:
+            events, entered, exited, paths = processor.run()
+        except Exception as exc:  # one bad video should not lose the whole batch
+            item.status, item.message = 'failed', f'{type(exc).__name__}: {exc}'
+            log(f'  FAILED: {item.message}')
+            notify(item)
+            if strict:
+                abort_message = f'Strict mode: stopped after {item.relative} failed: {item.message}'
+                break
+            continue
+        if events is None:
+            item.status, item.message = 'cancelled', 'cancelled while processing'
+            notify(item)
+            continue
+        item.status = 'processed'
+        item.message = f'{len(events)} events | IN={sum(entered.values())} | OUT={sum(exited.values())}'
+        item.result = {'entries': entered, 'exits': exited,
+                       'total_events': len(events), 'outputs': paths}
+        log(f'  {item.message}')
+        if progress_cb is not None:
+            progress_cb(index, len(runnable), 100.0, 'done')
+        notify(item)
+
+    if abort_message:
+        for item in runnable:
+            if item.status == 'pending':
+                item.status, item.message = 'cancelled', 'strict mode stopped the batch first'
+                notify(item)
+
+    summary = _write_batch_summary(plan, strict, render_video, parameters_file,
+                                   started, cancel_event, code_version, metadata_path)
+    if abort_message:
+        raise BatchAbort(abort_message, summary)
+    if not runnable:
+        raise BatchAbort('No videos could be processed (every video is missing a '
+                         'valid circle). Details are in '
+                         f"{summary['files']['summary']}", summary)
+    return summary
+
+
+def _write_batch_summary(plan: BatchPlan, strict: bool, render_video: bool,
+                         parameters_file: str | None, started, cancel_event,
+                         code_version: str | None = None,
+                         metadata_path: Path | None = None) -> dict:
+    """Write batch_summary.json at the output root and return its content."""
+    def entry(item):
+        record = {'video': str(item.video), 'relative_path': item.relative,
+                  'output_dir': str(item.output_dir),
+                  'circle_source': item.circle.source,
+                  'circle_file': str(item.circle.path) if item.circle.path else None}
+        if item.status == 'processed':
+            record.update(item.result)
+        else:
+            record['reason'] = item.message
+        return record
+
+    by_status = defaultdict(list)
+    for item in plan.items:
+        by_status[item.status].append(entry(item))
+    totals_in = {q: 0 for q in _QUADRANTS}
+    totals_out = {q: 0 for q in _QUADRANTS}
+    for item in plan.items:
+        if item.status == 'processed':
+            for q in _QUADRANTS:
+                totals_in[q] += int(item.result['entries'].get(q, 0))
+                totals_out[q] += int(item.result['exits'].get(q, 0))
+    summary_path = plan.output_root / 'batch_summary.json'
+    summary = {
+        'run_started_at_utc': started.isoformat(),
+        'run_finished_at_utc': datetime.now(timezone.utc).isoformat(),
+        'input': str(plan.input_root), 'output': str(plan.output_root),
+        'recursive': plan.recursive, 'strict': strict,
+        'render_video': bool(render_video),
+        'code_version': code_version or 'not provided',
+        'parameters_file': str(parameters_file) if parameters_file else None,
+        'effective_parameters': _runtime_parameter_snapshot(),
+        'circle_file': plan.circle_file,
+        'cancelled': bool(cancel_event is not None and cancel_event.is_set()),
+        'videos_found': len(plan.items),
+        'videos_processed': len(by_status['processed']),
+        'videos_skipped': len(by_status['skipped']),
+        'videos_failed': len(by_status['failed']),
+        'videos_cancelled': len(by_status['cancelled']),
+        'totals': {'entries': totals_in, 'exits': totals_out},
+        'per_video': by_status['processed'],
+        'skipped': by_status['skipped'],
+        'failed': by_status['failed'],
+        'cancelled_videos': by_status['cancelled'],
+        'files': {'summary': str(summary_path),
+                  'metadata': str(metadata_path) if metadata_path else None},
+    }
+    summary_path.write_text(json.dumps(summary, indent=2, default=str) + '\n', encoding='utf-8')
+    return summary
 
 
 def _apply_cli_parameters(filename: str | None) -> dict:
@@ -3385,41 +5486,224 @@ def _apply_cli_parameters(filename: str | None) -> dict:
 
 def run_batch_mode(videos_dir: str | None = None, video_file: str | None = None,
                    parameters_file: str | None = None, circle_file: str | None = None,
-                   output_dir: str | None = None, render_video: bool = False):
-    """Run the production tracker on every selected video without the GUI.
+                   output_dir: str | None = None, render_video: bool = False,
+                   recursive: bool = False, strict: bool = False,
+                   code_version: str | None = None) -> dict:
+    """CLI wrapper: plan (pre-run circle check) -> print -> execute.
 
-    Per-video circle files are mandatory unless a shared --circle-file is
-    supplied. Produces counts and ant bounding-box CSVs, optional MP4s,
-    saved circle metadata and one batch JSON summary.
+    Missing/invalid circles are skipped unless strict. An invalid shared
+    --circle-file, or a single --video without a circle, always stops.
     """
-    videos = _videos_from_inputs(videos_dir, video_file)
-    output = (Path(output_dir).expanduser().resolve() if output_dir else
-              videos[0].parent / 'batch_results')
-    output.mkdir(parents=True, exist_ok=True)
-    results = []
-    for idx, video in enumerate(videos, 1):
-        circle, circle_path = _regression_circle(video, video.parent, circle_file)
-        print(f'[{idx}/{len(videos)}] Processing {video.name} | circle={circle_path}', flush=True)
-        processor = VideoProcessor(str(video), circle,
-                                   lambda pct, msg: None, lambda msg: None,
-                                   out_dir=str(output), stem=video.stem,
-                                   render_video=render_video)
-        events, entered, exited, paths = processor.run()
-        if events is None:
-            raise RuntimeError(f'Processing did not complete: {video}')
-        results.append({'video': str(video), 'circle_source': str(circle_path),
-                        'entries': entered, 'exits': exited, 'total_events': len(events),
-                        'outputs': paths})
-        print(f'  Events: {len(events)} | IN={sum(entered.values())} | '
-              f'OUT={sum(exited.values())}', flush=True)
-    summary = output / 'batch_summary.json'
-    summary.write_text(json.dumps({'videos_processed': len(results),
-                                   'parameters_file': parameters_file,
-                                   'per_video': results}, indent=2), encoding='utf-8')
-    print(f'Batch completed: {summary}', flush=True)
-    return results
+    if circle_file:
+        shared = Path(circle_file).expanduser().resolve()
+        if not shared.is_file():
+            raise ValueError(f'--circle-file not found: {shared}')
+        if _read_circle_file(shared)[0] is None:
+            raise ValueError(f'Invalid --circle-file {shared}: {_read_circle_file(shared)[1]}')
+    plan = plan_batch(videos_dir, video_file, recursive, circle_file, output_dir)
+    print(plan.summary_line(), flush=True)
+    for line in plan.problem_lines():
+        print(line, flush=True)
+    if plan.single_video and plan.items[0].state != 'ready':
+        raise ValueError(f'{plan.items[0].relative}: {plan.items[0].reason}. '
+                         'Create one in the GUI or pass --circle-file FILE')
+
+    last_print = {}
+
+    def progress(index, total, pct, msg):
+        if 'Frame ' in msg and last_print.get(index) != msg:
+            last_print[index] = msg
+            print(f'  {pct:5.1f}% {msg}', flush=True)
+
+    summary = execute_batch(plan, strict, render_video, parameters_file,
+                            progress_cb=progress, log_cb=lambda m: print(m, flush=True),
+                            code_version=code_version, interface='cli')
+    _print_batch_report(summary, 'Batch complete')
+    return summary
 
 
+def _print_batch_report(summary: dict, heading: str) -> None:
+    """End-of-run terminal report: counts, then every skipped/failed/not-run
+    video with its reason, so nothing has to be dug out of the JSON."""
+    print(f"\n{heading}: {summary['videos_processed']} processed, "
+          f"{summary['videos_skipped']} skipped, {summary['videos_failed']} failed"
+          + (f", {summary['videos_cancelled']} not run" if summary['videos_cancelled'] else ''),
+          flush=True)
+    for title, key in (('Skipped', 'skipped'), ('Failed', 'failed'),
+                       ('Not run', 'cancelled_videos')):
+        records = summary.get(key) or []
+        if records:
+            print(f'{title} ({len(records)}):', flush=True)
+            for record in records:
+                print(f"  {record['relative_path']}: {record.get('reason') or 'no reason recorded'}",
+                      flush=True)
+    print(f"Summary: {summary['files']['summary']}", flush=True)
+    if summary['files'].get('metadata'):
+        print(f"Metadata: {summary['files']['metadata']}", flush=True)
+
+
+# ============================================================================
+# EQUIVALENT COMMAND LINES (printed after prompts; copied from the GUI)
+# ============================================================================
+def _script_display_path() -> str:
+    """Path to this script as the user would type it from the current folder."""
+    script = Path(__file__).resolve()
+    try:
+        return os.path.relpath(script)
+    except ValueError:  # different drive on Windows
+        return str(script)
+
+
+def build_command_line(mode: str, **opts) -> str:
+    """Build a copy-pasteable command for 'run', 'regression' or 'optimize'.
+
+    Only options that differ from their defaults are included.
+    """
+    parts = ['python', _script_display_path()]
+
+    def add(flag, value=None, condition=True):
+        if condition:
+            parts.append(flag)
+            if value is not None:
+                parts.append(str(value))
+
+    if mode == 'run':
+        add('--run')
+        add('--videos', opts.get('videos'), bool(opts.get('videos')))
+        for video in _as_file_list(opts.get('video')):
+            add('--video', video)
+        add('--recursive', condition=bool(opts.get('recursive')))
+        add('--strict', condition=bool(opts.get('strict')))
+    elif mode == 'regression':
+        add('--regression', opts.get('regression'))
+        add('--videos', opts.get('videos'))
+        add('--quadrant', opts.get('quadrant'), bool(opts.get('quadrant')))
+        add('--show-plot', condition=bool(opts.get('show_plot')))
+        add('--skip-missing-circles', condition=bool(opts.get('skip_missing_circles')))
+    elif mode == 'optimize':
+        if opts.get('optimize'):
+            add('--optimize', opts['optimize'])
+        else:
+            add('--optimize')
+            add('--ground-truth', opts.get('ground_truth'))
+            add('--videos', opts.get('videos'))
+        add('--trials', opts.get('trials'), opts.get('trials', 30) != 30)
+        add('--match-distance', opts.get('match_distance'), opts.get('match_distance', 25.0) != 25.0)
+        add('--seed', opts.get('seed'), opts.get('seed', 42) != 42)
+    else:
+        raise ValueError(f'Unknown mode {mode!r}')
+    add('--parameters', opts.get('parameters'), bool(opts.get('parameters')))
+    add('--circle-file', opts.get('circle_file'), bool(opts.get('circle_file')))
+    add('--output', opts.get('output'), bool(opts.get('output')))
+    add('--render-video', condition=bool(opts.get('render_video')))
+    add('--code-version', opts.get('code_version'), bool(opts.get('code_version')))
+    return ' '.join(shlex.quote(p) for p in parts)
+
+
+# ============================================================================
+# INTERACTIVE PROMPTS for missing required inputs (terminal only)
+# ============================================================================
+class PromptCancelled(Exception):
+    """User left a prompt empty, pressed Ctrl-C/Ctrl-D, or ran out of tries."""
+
+
+def _ask_code_version(given: str | None, can_prompt: bool, input_fn=input) -> str:
+    """The GitHub version to record in the run metadata.
+
+    --code-version wins. Otherwise ask in a terminal, offering the version
+    detected from git (Enter accepts it). Without a terminal, use the detected
+    version, or 'not provided'."""
+    if given:
+        return given
+    detected = detect_code_version()
+    if not can_prompt:
+        if not detected:
+            print('Note: no --code-version given and none detected from git; '
+                  'metadata will say "not provided".', flush=True)
+        return detected or 'not provided'
+    hint = f' [Enter = {detected}]' if detected else ''
+    try:
+        answer = input_fn(f'GitHub version of the code for this run (commit, tag or release){hint}: ')
+    except (EOFError, KeyboardInterrupt):
+        print('')
+        raise PromptCancelled('cancelled at prompt') from None
+    return answer.strip() or detected or 'not provided'
+
+
+def _can_prompt(args) -> bool:
+    """Prompt only in an interactive terminal and when --no-prompt is absent."""
+    if getattr(args, 'no_prompt', False):
+        return False
+    try:
+        return bool(sys.stdin and sys.stdin.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
+def _clean_typed_path(raw: str) -> str:
+    """Undo terminal quoting: surrounding quotes, backslash-escaped spaces, ~."""
+    text = raw.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in '"\'':
+        text = text[1:-1]
+    elif os.name != 'nt':
+        # Dragging a file into macOS Terminal produces e.g. /Users/me/ant\ videos
+        text = re.sub(r'\\(.)', r'\1', text)
+    return os.path.expanduser(text)
+
+
+def _check_prompted_path(path: Path, kind: str, recursive: bool = False) -> tuple[bool, str]:
+    """Validate a typed path for a prompt kind; return (ok, message)."""
+    if not path.exists():
+        return False, f'Not found: {path}'
+    if kind in ('video_dir', 'video_or_dir') and path.is_dir():
+        try:
+            count = len(_videos_from_inputs(str(path), None, recursive))
+        except ValueError as exc:
+            return False, str(exc)
+        where = 'folder (including subfolders)' if recursive else 'folder'
+        return True, f'{where.capitalize()}, {count} video(s) found'
+    if kind == 'video_or_dir':
+        if path.suffix.lower() in OPTIMIZE_VIDEO_EXTENSIONS:
+            return True, 'Video file'
+        return False, f'Not a supported video ({", ".join(sorted(OPTIMIZE_VIDEO_EXTENSIONS))}): {path.name}'
+    if kind == 'video_dir':
+        return False, f'Not a folder: {path}'
+    if kind == 'csv_or_dir':
+        if path.is_file():
+            return (True, 'CSV file') if path.suffix.lower() == '.csv' else \
+                   (False, f'Not a CSV file: {path.name}')
+        count = sum(1 for p in path.iterdir() if p.is_file() and p.suffix.lower() == '.csv')
+        return (True, f'Folder, {count} CSV file(s) found') if count else \
+               (False, f'No CSV files in {path}')
+    if kind == 'dir':
+        return (True, 'Folder') if path.is_dir() else (False, f'Not a folder: {path}')
+    raise ValueError(f'Unknown prompt kind {kind!r}')
+
+
+def _prompt_path(label: str, kind: str, retries: int = 3, recursive: bool = False,
+                 input_fn=input, output_fn=print) -> Path:
+    """Ask for a path until it validates; raise PromptCancelled on empty/Ctrl-C."""
+    for attempt in range(retries):
+        try:
+            raw = input_fn(f'{label}: ')
+        except (EOFError, KeyboardInterrupt):
+            output_fn('')
+            raise PromptCancelled('cancelled at prompt') from None
+        if not raw.strip():
+            raise PromptCancelled('empty answer')
+        path = Path(_clean_typed_path(raw)).resolve()
+        ok, message = _check_prompted_path(path, kind, recursive)
+        if ok:
+            output_fn(f'  ✓ {message}')
+            return path
+        left = retries - attempt - 1
+        output_fn(f'  ✗ {message}' + (f' - try again ({left} left)' if left else ''))
+    raise PromptCancelled('too many invalid answers')
+
+
+# ============================================================================
+# ARGUMENT PARSER AND ENTRY POINT
+# ============================================================================
 def build_argument_parser():
     """Define once: reusable inputs shared by GUI/batch/regression/Optuna."""
     parser = argparse.ArgumentParser(
@@ -3427,31 +5711,51 @@ def build_argument_parser():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     modes = parser.add_argument_group('modes (choose one; GUI is the default)')
     modes.add_argument('--run', action='store_true', help='Process video(s) headlessly using the production tracker')
-    modes.add_argument('--regression', nargs='?', const='', metavar='COUNTS_DIR',
+    modes.add_argument('--gui', action='store_true',
+                       help='Open the GUI with --run options (--videos/--video, --recursive, --strict, '
+                            '--output, --render-video, --parameters) pre-filled; with --regression, '
+                            'open the Regression tab pre-filled instead')
+    modes.add_argument('--regression', nargs='?', const='', metavar='COUNTS_CSV_OR_DIR',
                        help='Compare IN/OUT totals with count CSVs; path or use --ground-truth')
     modes.add_argument('--optimize', nargs='?', const='', metavar='DATASET_DIR',
                        help='Run Optuna on labeled ant positions; path or --ground-truth + --videos')
     shared = parser.add_argument_group('shared inputs and outputs')
     shared.add_argument('--videos', metavar='DIRECTORY', help='Folder of videos for any headless mode')
-    shared.add_argument('--video', metavar='FILE', help='One video for --run (not for Optuna/regression)')
+    shared.add_argument('--video', metavar='FILE', action='append',
+                        help='A video for --run/--gui; repeat for several videos from any folders '
+                             '(not for Optuna/regression)')
     shared.add_argument('--parameters', '--settings', dest='parameters', metavar='JSON',
                         help='Parameter preset for GUI/batch/regression and base preset for Optuna')
     shared.add_argument('--ground-truth', metavar='CSV_OR_DIRECTORY',
                         help='Ground-truth count CSVs (regression) or positions (Optuna)')
     shared.add_argument('--circle-file', metavar='JSON',
-                        help='Shared circle geometry; else per-video *_circle.json')
+                        help='Shared circle for every video; else per-video <stem>_circle.json')
     shared.add_argument('--output', '--regression-output', dest='output', metavar='DIRECTORY',
                         help='Output root directory')
     shared.add_argument('--render-video', '--render-regression-video', dest='render_video',
                         action='store_true', help='Write annotated MP4 files for batch/regression')
     shared.add_argument('--no-render-video', dest='render_video', action='store_false',
                         help='Skip annotated MP4s in headless modes')
+    shared.add_argument('--code-version', metavar='TEXT',
+                        help='GitHub version of the code (commit, tag or release) recorded in the run '
+                             'metadata. If omitted you are asked in a terminal (Enter accepts the '
+                             'version detected from git)')
+    shared.add_argument('--no-prompt', action='store_true',
+                        help='Never prompt for missing inputs; error instead (automatic when not in a terminal)')
     parser.set_defaults(render_video=False)
+    batch = parser.add_argument_group('batch options (--run / --gui)')
+    batch.add_argument('--recursive', action='store_true',
+                       help='Include videos in all subfolders of --videos; outputs mirror the folder tree')
+    batch.add_argument('--strict', action='store_true',
+                       help='Stop before processing if any circle is missing/invalid, and on the first failed video')
     specific = parser.add_argument_group('mode-specific options')
     specific.add_argument('--show-plot', action='store_true',
                           help='Display regression plot interactively after saving PNG (requires display)')
     specific.add_argument('--quadrant', choices=_QUADRANTS,
                           help='Only evaluate this quadrant for regression')
+    specific.add_argument('--skip-missing-circles', action='store_true',
+                          help='Regression: skip (and list) matched videos without a valid circle '
+                               'instead of stopping')
     specific.add_argument('--trials', type=int, default=30, help='Additional Optuna trials')
     specific.add_argument('--match-distance', type=float, default=25.0,
                           help='Optuna detection matching radius in original pixels')
@@ -3459,61 +5763,190 @@ def build_argument_parser():
     return parser
 
 
-def main(argv=None):
-    parser = build_argument_parser()
-    args = parser.parse_args(argv)
+def _check_conflicts(parser, args, run_mode: bool, plain_gui: bool) -> None:
+    """Contradictory flags are always errors; they are never prompted for."""
     regression_mode = args.regression is not None
     optimize_mode = args.optimize is not None
-    if sum((args.run, regression_mode, optimize_mode)) > 1:
-        parser.error('Choose only one of --run, --regression or --optimize')
-    # Explicit video inputs without a mode mean regular batch processing.
-    run_mode = args.run or (not regression_mode and not optimize_mode and
-                            bool(args.video or args.videos))
-    if (args.video and args.videos) or (args.video and (regression_mode or optimize_mode)):
-        parser.error('--video is for single-video --run; use --videos for folder modes')
+    batch_mode = run_mode or (args.gui and not regression_mode)
+    if args.video and args.videos:
+        parser.error('Use either --video FILE or --videos DIRECTORY, not both')
+    if args.video and (regression_mode or optimize_mode):
+        parser.error('--video is for --run/--gui; use --videos for folder modes')
+    if args.recursive and args.video:
+        parser.error('--recursive applies to a folder (--videos), not to --video files')
+    if args.recursive and not batch_mode:
+        parser.error('--recursive is only available with --run or --gui (not with --regression)')
+    if args.strict and not batch_mode:
+        parser.error('--strict is only available with --run or --gui (not with --regression)')
+    if args.skip_missing_circles and not regression_mode:
+        parser.error('--skip-missing-circles is only available with --regression')
     if args.quadrant and not regression_mode:
         parser.error('--quadrant is only available with --regression')
     if args.show_plot and not regression_mode:
         parser.error('--show-plot is only available with --regression')
     if args.ground_truth and not (regression_mode or optimize_mode):
         parser.error('--ground-truth requires --regression or --optimize')
+    if args.regression and args.ground_truth:
+        parser.error('Use either --regression CSV_OR_DIR or --ground-truth CSV_OR_DIR, not both')
+    if args.optimize and (args.videos or args.ground_truth):
+        parser.error('Use --optimize DATASET_DIR OR --optimize --ground-truth DIR --videos DIR')
+    if args.circle_file and args.gui and not regression_mode:
+        parser.error('--circle-file is not used by the GUI: there each video\'s circle is either '
+                     'found as <name>_circle.json or clicked by hand. Use --circle-file with --run.')
     if args.circle_file and optimize_mode:
         parser.error('--circle-file does not affect positional Optuna optimization')
     if args.render_video and optimize_mode:
-        parser.error('--render-video is only supported in --run and --regression')
+        parser.error('--render-video is only supported in --run, --gui and --regression')
+    if plain_gui and (args.output or args.circle_file or args.render_video):
+        parser.error('--output, --circle-file and --render-video need --run or --regression '
+                     '(--gui can pre-fill --output and --render-video)')
+
+
+def main(argv=None):
+    parser = build_argument_parser()
+    args = parser.parse_args(argv)
+    regression_mode = args.regression is not None
+    optimize_mode = args.optimize is not None
+    if sum((args.run, regression_mode, optimize_mode)) > 1 or (
+            args.gui and (args.run or optimize_mode)):
+        parser.error('Choose only one of --run, --gui, --regression or --optimize '
+                     '(--gui may be combined with --regression)')
+    # Explicit video inputs without a mode mean regular batch processing.
+    run_mode = args.run or (not (args.gui or regression_mode or optimize_mode)
+                            and bool(args.video or args.videos))
+    plain_gui = not (run_mode or args.gui or regression_mode or optimize_mode)
+    _check_conflicts(parser, args, run_mode, plain_gui)
+
+    can_prompt = _can_prompt(args)
+    prompted = []
+
+    def need(label, kind, error_message, recursive=False):
+        """Prompt for a missing required path, or error when prompting is off."""
+        if not can_prompt:
+            parser.error(error_message + ' (run in a terminal to be prompted, '
+                         'or see --help)')
+        if not prompted:
+            print('Missing required input. Press Enter on an empty line or '
+                  'Ctrl-C to cancel.', flush=True)
+        prompted.append(label)
+        return str(_prompt_path(label, kind, recursive=recursive))
+
     try:
-        _apply_cli_parameters(args.parameters)
-        if regression_mode:
-            if args.regression and args.ground_truth:
-                parser.error('Use either --regression DIRECTORY or --ground-truth DIRECTORY')
+        if regression_mode and args.gui:
+            # Regression GUI: open the Regression tab pre-filled; no prompts.
+            _require_gui_dependencies()
+            _apply_cli_parameters(args.parameters)
+            App(prefill={'regression': {
+                'ground_truth': args.regression or args.ground_truth, 'videos': args.videos,
+                'parameters': args.parameters, 'circle_file': args.circle_file,
+                'output': args.output, 'quadrant': args.quadrant,
+                'render_video': args.render_video,
+                'skip_missing_circles': args.skip_missing_circles},
+                'code_version': args.code_version}).run()
+        elif regression_mode:
+            if not (args.regression or args.ground_truth):
+                args.regression = need('Ground-truth counts CSV or folder (--regression)', 'csv_or_dir',
+                                       '--regression requires a ground-truth CSV or folder')
+            if not args.videos:
+                args.videos = need('Video folder (--videos)', 'video_dir',
+                                   '--regression requires --videos DIRECTORY')
             gt = args.regression or args.ground_truth
-            if not gt or not args.videos:
-                parser.error('--regression requires ground-truth counts and --videos DIRECTORY')
+            args.code_version = _ask_code_version(args.code_version, can_prompt)
+            if prompted:
+                print('\nEquivalent command:\n' + build_command_line(
+                    'regression', regression=gt, videos=args.videos, quadrant=args.quadrant,
+                    show_plot=args.show_plot, skip_missing_circles=args.skip_missing_circles,
+                    parameters=args.parameters,
+                    circle_file=args.circle_file, output=args.output,
+                    render_video=args.render_video, code_version=args.code_version) + '\n',
+                    flush=True)
+            _apply_cli_parameters(args.parameters)
             run_regression_mode(gt, args.videos, args.parameters, args.quadrant,
-                                args.circle_file, args.output, args.render_video, args.show_plot)
+                                args.circle_file, args.output, args.render_video, args.show_plot,
+                                skip_missing_circles=args.skip_missing_circles,
+                                code_version=args.code_version)
         elif optimize_mode:
-            if args.optimize and (args.videos or args.ground_truth):
-                parser.error('Use --optimize DATASET_DIR OR --optimize --ground-truth DIR --videos DIR')
             if not args.optimize and not (args.videos and args.ground_truth):
-                parser.error('--optimize needs DATASET_DIR or both --videos and --ground-truth')
+                if not args.videos and not args.ground_truth and can_prompt:
+                    dataset = need('Dataset folder (--optimize; holds ground-truth/ and videos/)',
+                                   'dir', '')
+                    if (Path(dataset) / 'ground-truth').is_dir() and (Path(dataset) / 'videos').is_dir():
+                        args.optimize = dataset
+                    else:
+                        print('  That folder has no ground-truth/ and videos/ subfolders; '
+                              'enter them separately.', flush=True)
+                if not args.optimize:
+                    if not args.ground_truth:
+                        args.ground_truth = need('Ground-truth position CSV folder (--ground-truth)',
+                                                 'csv_or_dir',
+                                                 '--optimize needs DATASET_DIR or both --videos and --ground-truth')
+                    if not args.videos:
+                        args.videos = need('Video folder (--videos)', 'video_dir',
+                                           '--optimize needs DATASET_DIR or both --videos and --ground-truth')
+            if prompted:
+                print('\nEquivalent command:\n' + build_command_line(
+                    'optimize', optimize=args.optimize, ground_truth=args.ground_truth,
+                    videos=args.videos, trials=args.trials, match_distance=args.match_distance,
+                    seed=args.seed, parameters=args.parameters, output=args.output) + '\n', flush=True)
+            _apply_cli_parameters(args.parameters)
             folder = args.optimize or Path(args.videos).expanduser().resolve().parent
             output = args.output
             if not args.optimize and not output:
                 output = str(Path(args.videos).expanduser().resolve() / 'optuna_results')
             run_optimization_mode(folder, args.trials, args.match_distance, args.seed,
-                                  args.ground_truth, args.videos, output)
+                                  args.ground_truth, args.videos, output,
+                                  code_version=args.code_version or detect_code_version() or None,
+                                  parameters_file=args.parameters)
         elif run_mode:
             if not (args.videos or args.video):
-                parser.error('--run requires --videos DIRECTORY or --video FILE')
-            run_batch_mode(args.videos, args.video, args.parameters,
-                           args.circle_file, args.output, args.render_video)
+                if args.recursive:
+                    args.videos = need('Video folder (--videos)', 'video_dir',
+                                       '--run requires --videos DIRECTORY or --video FILE',
+                                       recursive=True)
+                else:
+                    chosen = Path(need('Video folder or file (--videos / --video)', 'video_or_dir',
+                                       '--run requires --videos DIRECTORY or --video FILE'))
+                    if chosen.is_dir():
+                        args.videos = str(chosen)
+                    else:
+                        args.video = [str(chosen)]
+            args.code_version = _ask_code_version(args.code_version, can_prompt)
+            if prompted:
+                print('\nEquivalent command:\n' + build_command_line(
+                    'run', videos=args.videos, video=args.video, recursive=args.recursive,
+                    strict=args.strict, parameters=args.parameters, circle_file=args.circle_file,
+                    output=args.output, render_video=args.render_video,
+                    code_version=args.code_version) + '\n', flush=True)
+            _apply_cli_parameters(args.parameters)
+            summary = run_batch_mode(args.videos, args.video, args.parameters, args.circle_file,
+                                     args.output, args.render_video, args.recursive, args.strict,
+                                     code_version=args.code_version)
+            # Skipped videos (known reasons, e.g. no circle) still exit 0;
+            # a video that FAILED to process exits 1 so scripts can notice.
+            if summary['videos_failed']:
+                parser.exit(1, f"Exit code 1: {summary['videos_failed']} video(s) failed "
+                               '(listed above); the other videos were processed.\n')
         else:
-            # Keep the original GUI as the default, with shared presets supported.
-            if args.output or args.circle_file or args.render_video:
-                parser.error('--output, --circle-file and --render-video require a headless mode')
-            App().run()
+            # GUI: plain (default) or --gui with run options pre-filled.
+            _require_gui_dependencies()
+            _apply_cli_parameters(args.parameters)
+            prefill = {'parameters': args.parameters, 'code_version': args.code_version}
+            if args.gui:
+                prefill.update(videos=args.videos, video=args.video, recursive=args.recursive,
+                               strict=args.strict, output=args.output,
+                               render_video=args.render_video)
+            App(prefill=prefill).run()
+    except PromptCancelled as exc:
+        parser.exit(1, f'Cancelled ({exc}): nothing was run.\n')
+    except BatchAbort as exc:
+        if exc.summary:
+            _print_batch_report(exc.summary, 'Batch stopped')
+        parser.exit(2, f'\n{exc}\n')
+    except KeyboardInterrupt:
+        parser.exit(130, '\nInterrupted.\n')
     except (ValueError, OSError, RuntimeError, json.JSONDecodeError) as exc:
-        parser.error(str(exc))
+        # Runtime problems (bad files, missing circles): message only, no usage.
+        parser.exit(2, f'{parser.prog}: error: {exc}\n')
 
 
 if __name__ == '__main__':
