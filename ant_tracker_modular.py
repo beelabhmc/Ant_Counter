@@ -97,7 +97,7 @@
 #
 # INPUT CONVENTIONS:
 #   videos/foo.mp4 pairs with ground-truth/foo.csv (same stem).
-#   Optuna position CSV: timestamp,frame,ant_id,ant_x,ant_y, with zero-based
+#   Optuna position CSV: timestamp,frame,ant_x,ant_y (ant_id optional), zero-based
 #     frame indices and source-resolution x/y pixel coordinates.
 #
 # NOTES:
@@ -3800,7 +3800,7 @@ def _opt_elapsed(seconds: float) -> str:
 # Usage: python ant_tracker_optuna.py --optimize /path/to/folder --trials 30
 #        python ant_tracker_optuna.py --settings /path/to/folder/ant_tuning_parameters.json
 # Input folder/{ground-truth, videos}; CSV header:
-# timestamp,frame,ant_id,ant_x,ant_y. Frames are ZERO-BASED and coordinates
+# timestamp,frame,ant_x,ant_y (ant_id optional). Frames are ZERO-BASED and coordinates
 # correspond to the source video's original (unscaled) pixel resolution.
 # A separate ground-truth row is required for EACH visible ant at each labeled
 # frame. Omitted ants count as unannotated (predictions will be false positives).
@@ -3817,7 +3817,8 @@ def _opt_elapsed(seconds: float) -> str:
 # ==========================================================================
 
 OPTIMIZE_VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.m4v'}
-GROUND_TRUTH_COLUMNS = {'timestamp', 'frame', 'ant_id', 'ant_x', 'ant_y'}
+# ant_id is optional (older annotator CSVs have it; scoring never uses it).
+GROUND_TRUTH_COLUMNS = {'timestamp', 'frame', 'ant_x', 'ant_y'}
 
 
 @dataclass(frozen=True)
@@ -3981,7 +3982,7 @@ class GroundTruthReader:
                     timestamp = self._time_seconds(str(row['timestamp']))
                     frame_as_float = float(row['frame'])
                     frame = int(frame_as_float)
-                    ant_id = str(row['ant_id']).strip()
+                    ant_id = str(row.get('ant_id') or '').strip() or f'row{line}'
                     x, y = float(row['ant_x']), float(row['ant_y'])
                 except (ValueError, KeyError, TypeError) as exc:
                     raise ValueError(f'{pair.ground_truth_path.name}, row {line}: invalid annotation: {exc}') from exc
@@ -3993,9 +3994,12 @@ class GroundTruthReader:
                     raise ValueError(f'{pair.stem}, row {line}: invalid ID or coordinate outside {width}x{height}')
                 if timestamp < 0 or abs(timestamp - frame / fps) > max(0.15, 2.0 / fps):
                     raise ValueError(f'{pair.stem}, row {line}: timestamp {timestamp} disagrees with frame {frame} at {fps:.3f} FPS')
-                key = (frame, ant_id)
+                # The same point twice on one frame is dropped with a warning.
+                key = (frame, round(x, 3), round(y, 3))
                 if key in seen:
-                    raise ValueError(f'{pair.stem}, row {line}: duplicate (frame, ant_id) {key}')
+                    print(f'Warning: {pair.ground_truth_path.name}, row {line}: duplicate point '
+                          f'({x:g}, {y:g}) on frame {frame}; ignored', flush=True)
+                    continue
                 seen.add(key)
                 observations.append(GroundTruthObservation(timestamp, frame, ant_id, x, y))
         if not observations:

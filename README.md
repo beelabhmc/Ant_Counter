@@ -26,9 +26,38 @@ Run commands from the `Ant_Counter` folder. `python ant_tracker_modular.py --hel
 
 ## Ant Annotator
 
-- default parameters
-- ground truth from the ant annotator
-- using the ant_annotator py
+Marks ant centers on 30-second clips to make the labeled positions that [Hyperparameter Optimization](#hyperparameter-optimization) uses. One frame per second is annotated (30 frames per clip).
+
+```bash
+cd annotations
+python ant_annotator.py                                          # click every ant yourself
+python ant_annotator.py --tracker ../ant_tracker_modular.py      # start from guessed points
+python ant_annotator.py --tracker ../ant_tracker_modular.py --parameters ant_tuning_parameters.json
+```
+
+| Option | Mandatory? | What it does |
+|---|---|---|
+| `--tracker PATH` | optional | Path to `ant_tracker_modular.py`. The tracker runs on each new clip and pre-fills every frame with guessed points. |
+| `--parameters JSON` | optional (needs `--tracker`) | Tracker settings for the guesses; tuned settings guess better than the defaults |
+
+1. Choose the **Output folder**, **Add videos**, pick a start time and click **Go — annotate**.
+2. On each frame:
+   - **Click** to add a point.
+   - **Drag** a point to move it.
+   - **Right-click** a point to delete it.
+   - **Ctrl+Z** undoes.
+
+   Guesses show in yellow, your own points in blue, and points on a confirmed frame in green.
+3. Press **Enter** (Confirm frame) when the frame is right, including a frame with no ants; this also moves to the next frame.
+   - **Only confirmed frames are saved to the CSV.**
+   - Leaving a frame with unconfirmed points asks whether to confirm it.
+4. The tracker can't detect ants that stand still, so look for missed ants. Untick **Show guesses** to see the frame clean.
+
+Output, saved after every change:
+- `csv/<clip>.csv` with columns `Timestamp, frame, ant_x, ant_y` (no ant IDs)
+- `progress/<clip>.json`, which **Open existing annotation** resumes; older files with IDs open fine
+
+Copy the CSVs into your ground-truth folder for `--optimize`. Guessing needs the tracker's packages (numpy, scipy), which the conda environment already has.
 
 ## Ant Tracking
 
@@ -119,7 +148,7 @@ Tunes detection settings with Optuna against hand-labeled ant positions. CLI onl
 
 | | Option | Notes |
 |---|---|---|
-| **Mandatory** | `--ground-truth FOLDER` + `--videos FOLDER` | One label CSV per video, same name, columns `timestamp,frame,ant_id,ant_x,ant_y` (zero-based frames, original pixels) |
+| **Mandatory** | `--ground-truth FOLDER` + `--videos FOLDER` | One label CSV per video, same name, columns `timestamp,frame,ant_x,ant_y` (zero-based frames, original pixels; an old `ant_id` column is ignored) |
 | | *or* `--optimize DATASET` | Folder containing `ground-truth/` and `videos/` |
 | Optional | `--trials N` | Default 30 |
 | | `--parameters FILE` | Starting settings |
