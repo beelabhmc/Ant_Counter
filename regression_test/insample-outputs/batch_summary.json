@@ -1,0 +1,31 @@
+{
+  "videos_processed": 1,
+  "parameters_file": "annotations/ant_annotation_output/ant_tuning_parameters.json",
+  "per_video": [
+    {
+      "video": "/mnt/aculeata/Harvester Ant Videos Fall 2025/big_rep_sample/10_9_2025_57/GX010308.MP4",
+      "circle_source": "regression_test/outputs/GX010308_circle.json",
+      "entries": {
+        "NE": 0,
+        "SE": 1,
+        "SW": 1,
+        "NW": 0
+      },
+      "exits": {
+        "NE": 0,
+        "SE": 0,
+        "SW": 1,
+        "NW": 1
+      },
+      "total_events": 4,
+      "outputs": {
+        "csv": "/home/livia/Fall2026/Ant_Counter/regression_test/outputs/GX010308_counts.csv",
+        "ant_boxes_csv": "/home/livia/Fall2026/Ant_Counter/regression_test/outputs/GX010308_ant_boxes.csv",
+        "video": null,
+        "circle": "/home/livia/Fall2026/Ant_Counter/regression_test/outputs/GX010308_circle.json",
+        "summary": "/home/livia/Fall2026/Ant_Counter/regression_test/outputs/GX010308_summary.csv",
+        "output_dir": "/home/livia/Fall2026/Ant_Counter/regression_test/outputs"
+      }
+    }
+  ]
+}

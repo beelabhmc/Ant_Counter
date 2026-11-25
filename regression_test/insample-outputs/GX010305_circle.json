@@ -1,0 +1,17 @@
+{
+  "video": "/mnt/aculeata/Harvester Ant Videos Fall 2025/big_rep_sample/10_9_2025_57/GX010305.MP4",
+  "circle_params": {
+    "center": [
+      1979.554390563565,
+      1233.0275229357799
+    ],
+    "radius": 410.0,
+    "north_angle": 269.0530485532265
+  },
+  "orig_width": 3840,
+  "orig_height": 2160,
+  "process_scale": 0.35,
+  "detection": "frame_diff_quadrants",
+  "frame_stride": 5,
+  "diff_thresh": 11
+}

@@ -1,0 +1,114 @@
+{
+  "best_trial": 2525,
+  "best_objective_score": 0.7115072933549432,
+  "best_trial_params": {
+    "PROCESS_SCALE": 0.35,
+    "DIFF_THRESH": 11,
+    "FRAME_STRIDE": 5,
+    "MIN_BLOB_AREA": 37,
+    "MAX_BLOB_AREA": 900,
+    "MORPH_CLOSE_SIZE": 3,
+    "MORPH_OPEN_SIZE": 1,
+    "CLUSTER_DISTANCE": 20,
+    "VIBRATION_PCT": 11.0,
+    "KF_PROC_POS": 8.741806546774981,
+    "KF_PROC_VEL": 2.091664006648647,
+    "KF_MEAS_POS": 3.18370013729695,
+    "MAX_TRACK_DIST": 72,
+    "TEMPORAL_MAX_GAP": 6,
+    "REACQUIRE_DISTANCE_SCALE": 1.4,
+    "MAX_COAST_FRAMES": 2
+  },
+  "settings_path": "ant_tuning_parameters.json",
+  "objective": "Detection-only micro-averaged F1 (spatial matching, no identity score)",
+  "match_distance_px": 25.0,
+  "ground_truth_coordinate_system": "original-resolution pixels",
+  "frame_numbering": "zero-based",
+  "n_complete_trials": 3000,
+  "seed": 42,
+  "training_videos": [
+    "GX010284",
+    "GX010285",
+    "GX010287",
+    "GX010289",
+    "GX010304",
+    "GX010305",
+    "GX010306",
+    "GX010307",
+    "GX010308"
+  ],
+  "per_video_metrics": [
+    {
+      "stem": "GX010284",
+      "true_positives": 82,
+      "false_positives": 8,
+      "false_negatives": 33,
+      "detection_f1": 0.8,
+      "mean_position_error_px": 10.974833215701542
+    },
+    {
+      "stem": "GX010285",
+      "true_positives": 59,
+      "false_positives": 10,
+      "false_negatives": 40,
+      "detection_f1": 0.7023809523809523,
+      "mean_position_error_px": 11.279499217403309
+    },
+    {
+      "stem": "GX010287",
+      "true_positives": 133,
+      "false_positives": 26,
+      "false_negatives": 90,
+      "detection_f1": 0.6963350785340314,
+      "mean_position_error_px": 12.085315222890245
+    },
+    {
+      "stem": "GX010289",
+      "true_positives": 57,
+      "false_positives": 9,
+      "false_negatives": 29,
+      "detection_f1": 0.75,
+      "mean_position_error_px": 12.73687905167716
+    },
+    {
+      "stem": "GX010304",
+      "true_positives": 10,
+      "false_positives": 17,
+      "false_negatives": 13,
+      "detection_f1": 0.4,
+      "mean_position_error_px": 12.72071128267271
+    },
+    {
+      "stem": "GX010305",
+      "true_positives": 34,
+      "false_positives": 24,
+      "false_negatives": 29,
+      "detection_f1": 0.5619834710743802,
+      "mean_position_error_px": 13.356664434939558
+    },
+    {
+      "stem": "GX010306",
+      "true_positives": 32,
+      "false_positives": 5,
+      "false_negatives": 11,
+      "detection_f1": 0.8,
+      "mean_position_error_px": 14.170046523599726
+    },
+    {
+      "stem": "GX010307",
+      "true_positives": 7,
+      "false_positives": 0,
+      "false_negatives": 1,
+      "detection_f1": 0.9333333333333333,
+      "mean_position_error_px": 8.801064201920761
+    },
+    {
+      "stem": "GX010308",
+      "true_positives": 25,
+      "false_positives": 2,
+      "false_negatives": 9,
+      "detection_f1": 0.819672131147541,
+      "mean_position_error_px": 13.611190887880397
+    }
+  ]
+}

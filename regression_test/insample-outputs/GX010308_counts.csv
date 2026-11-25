@@ -1,0 +1,5 @@
+timestamp_s,time,frame,event,quadrant,enter_count,exit_count,ant_id,x_orig,y_orig
+3.887,0:00:03,233,enter_SW,SW,1,0,27,1630.3,1447.8
+12.729,0:00:12,763,exit_SW,SW,1,1,77,1612.2,1415.2
+15.399,0:00:15,923,exit_NW,NW,0,1,95,1933.0,825.7
+270.921,0:04:30,16239,enter_SE,SE,1,0,570,2317.9,1464.6

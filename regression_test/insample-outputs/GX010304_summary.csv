@@ -1,0 +1,6 @@
+quadrant,enters,exits
+NE,1,0
+SE,7,4
+SW,5,3
+NW,1,0
+TOTAL,14,7

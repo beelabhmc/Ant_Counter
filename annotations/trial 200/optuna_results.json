@@ -1,0 +1,129 @@
+{
+  "best_trial": 12,
+  "best_objective_score": 0.5617794486215539,
+  "best_trial_params": {
+    "PROCESS_SCALE": 0.35,
+    "DIFF_THRESH": 19,
+    "FRAME_STRIDE": 5,
+    "MIN_BLOB_AREA": 12,
+    "MAX_BLOB_AREA": 300,
+    "MORPH_CLOSE_SIZE": 1,
+    "MORPH_OPEN_SIZE": 1,
+    "CLUSTER_DISTANCE": 24,
+    "VIBRATION_PCT": 5.0,
+    "KF_PROC_POS": 78.24527416335904,
+    "KF_PROC_VEL": 12.788663111222613,
+    "KF_MEAS_POS": 5.015212909767108,
+    "MAX_TRACK_DIST": 96,
+    "TEMPORAL_MAX_GAP": 2,
+    "REACQUIRE_DISTANCE_SCALE": 1.0,
+    "MAX_COAST_FRAMES": 1
+  },
+  "settings_path": "ant_tuning_parameters.json",
+  "objective": "F1 if no repeat GT IDs, otherwise 0.90*F1 + 0.10*ID_consistency",
+  "match_distance_px": 25.0,
+  "ground_truth_coordinate_system": "original-resolution pixels",
+  "frame_numbering": "zero-based",
+  "n_complete_trials": 30,
+  "seed": 42,
+  "training_videos": [
+    "GX010284",
+    "GX010285",
+    "GX010287",
+    "GX010304",
+    "GX010305",
+    "GX010306",
+    "GX010307",
+    "GX010308"
+  ],
+  "per_video_metrics": [
+    {
+      "stem": "GX010284",
+      "true_positives": 77,
+      "false_positives": 12,
+      "false_negatives": 38,
+      "detection_f1": 0.7549019607843137,
+      "mean_position_error_px": 11.660692769073057,
+      "identity_score": 0.0,
+      "identity_switches": 4,
+      "identity_links": 4
+    },
+    {
+      "stem": "GX010285",
+      "true_positives": 51,
+      "false_positives": 15,
+      "false_negatives": 48,
+      "detection_f1": 0.6181818181818182,
+      "mean_position_error_px": 12.311172773079482,
+      "identity_score": 0.0,
+      "identity_switches": 2,
+      "identity_links": 2
+    },
+    {
+      "stem": "GX010287",
+      "true_positives": 113,
+      "false_positives": 34,
+      "false_negatives": 110,
+      "detection_f1": 0.6108108108108108,
+      "mean_position_error_px": 13.081018697111045,
+      "identity_score": 0.0,
+      "identity_switches": 3,
+      "identity_links": 3
+    },
+    {
+      "stem": "GX010304",
+      "true_positives": 8,
+      "false_positives": 10,
+      "false_negatives": 15,
+      "detection_f1": 0.3902439024390244,
+      "mean_position_error_px": 10.735766529133858,
+      "identity_score": 0.0,
+      "identity_switches": 3,
+      "identity_links": 3
+    },
+    {
+      "stem": "GX010305",
+      "true_positives": 28,
+      "false_positives": 34,
+      "false_negatives": 35,
+      "detection_f1": 0.448,
+      "mean_position_error_px": 13.302917780940836,
+      "identity_score": 0.0,
+      "identity_switches": 10,
+      "identity_links": 10
+    },
+    {
+      "stem": "GX010306",
+      "true_positives": 23,
+      "false_positives": 10,
+      "false_negatives": 20,
+      "detection_f1": 0.6052631578947368,
+      "mean_position_error_px": 11.544988804318152,
+      "identity_score": 0.06666666666666665,
+      "identity_switches": 14,
+      "identity_links": 15
+    },
+    {
+      "stem": "GX010307",
+      "true_positives": 7,
+      "false_positives": 0,
+      "false_negatives": 1,
+      "detection_f1": 0.9333333333333333,
+      "mean_position_error_px": 10.275512555799361,
+      "identity_score": 0.0,
+      "identity_switches": 3,
+      "identity_links": 3
+    },
+    {
+      "stem": "GX010308",
+      "true_positives": 23,
+      "false_positives": 11,
+      "false_negatives": 11,
+      "detection_f1": 0.6764705882352942,
+      "mean_position_error_px": 13.399398703708744,
+      "identity_score": 0.05882352941176472,
+      "identity_switches": 16,
+      "identity_links": 17
+    }
+  ]
+}
